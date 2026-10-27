@@ -914,6 +914,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "etib-physics"
+version = "0.1.0"
+dependencies = [
+ "glam",
+]
+
+[[package]]
 name = "etib-scene"
 version = "0.1.0"
 dependencies = [

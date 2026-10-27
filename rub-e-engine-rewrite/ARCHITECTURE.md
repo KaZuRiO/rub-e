@@ -18,11 +18,12 @@ Built on [wgpu](https://wgpu.rs) 30 and [winit](https://github.com/rust-windowin
 
 ## 1. Crates
 
-Six crates, with a strict dependency rule: each knows about the layer below it
-and nothing about the layer above. Two of them are optional, and two —
-`etib-audio` and `etib-input` — have nothing of the workspace below them at all.
-`etib-input` sits beside the diagram: it knows winit and, behind its `gamepad`
-feature, gilrs, and draws nothing, so it needs no device.
+Seven crates, with a strict dependency rule: each knows about the layer below it
+and nothing about the layer above. Two of them are optional, and three —
+`etib-audio`, `etib-input` and `etib-physics` — have nothing of the workspace
+below them at all. The last two sit beside the diagram: `etib-input` knows
+winit and, behind its `gamepad` feature, gilrs; `etib-physics` knows only glam.
+Neither draws anything, so neither needs a device.
 
 ```text
   ┌───────────────────────────────────────────────────────────────────────────┐
@@ -55,6 +56,7 @@ feature, gilrs, and draws nothing, so it needs no device.
 | `etib` | The window, the frame loop, the `App` trait, the presentation passes | egui and cpal (behind the `ui` and `audio` features), what is being drawn or heard |
 | `etib-scene` | The camera and its controller, cube models, GPU frustum culling, the skybox, the `Scene` that draws them | windows, keyboards and the frame loop — the controller is told which way to `Move`; tone mapping, which is `PostProcess`'s job |
 | `etib-input` | Keyboard, mouse and gamepad state, fed from winit events and cleared once per frame | the GPU, the window, the frame loop and `App` — an application feeds it; gilrs, unless the `gamepad` feature is on |
+| `etib-physics` | Rigid bodies for cubes: gravity, spin, floor and wall contacts, cube-to-cube impulses, settling onto a face | the GPU, the window and the scene — it moves a position and a rotation the caller owns |
 | `etib-ui` | egui integration and the interface composite | the frame loop — it is usable with a loop of your own |
 | `etib-audio` | The output device, the mixer, sounds in memory, and CLAP instruments | everything else in the workspace, the GPU included |
 
@@ -843,6 +845,7 @@ shared between them by `#[path]`.
 | `crates/etib-input/src/input.rs` | `Input`: keyboard and mouse state, the per-frame cycle, focus loss |
 | `crates/etib-input/src/held.rs` | `Held<T>`: down / just pressed / just released, shared by keys and buttons |
 | `crates/etib-input/src/gamepad.rs` | `Gamepads`, `Gamepad`, the dead zone; gilrs, behind the `gamepad` feature |
+| `crates/etib-physics/src/lib.rs` | `RigidBody`, `apply_cube_collision`, `GRAVITY`; the engine's constants and its cgmath slerp |
 | `crates/etib-ui/src/layer.rs` | `EguiLayer`: input bridge and paint pass |
 | `crates/etib-ui/src/composite.rs` | The standard-range interface texture and its composite |
 | `crates/etib-audio/src/engine.rs` | `Audio`, `Play`, `Voice`; opening the device and the callback |
