@@ -88,9 +88,9 @@ impl TriangleCompute {
         if !self.target.resize(device, width, height) {
             return false;
         }
-        self.bindings = self
-            .layout
-            .group(device, "triangle", &[self.target.view(), &self.uniforms]);
+        self.bindings =
+            self.layout
+                .group(device, "triangle", &[self.target.view(), &self.uniforms]);
         true
     }
 
@@ -103,12 +103,7 @@ impl TriangleCompute {
                 resolution: [width as f32, height as f32],
                 angle: triangle.angle,
                 radius: triangle.radius,
-                color: [
-                    triangle.color[0],
-                    triangle.color[1],
-                    triangle.color[2],
-                    1.0,
-                ],
+                color: [triangle.color[0], triangle.color[1], triangle.color[2], 1.0],
                 intensity: triangle.intensity,
                 _padding: [0.0; 3],
             },

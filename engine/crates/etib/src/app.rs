@@ -185,7 +185,11 @@ where
             info!("frame {} | {:.1} fps", self.frame_index, self.fps);
             self.last_fps_log = now;
         }
-        trace!("frame {} begin (dt {:.2} ms)", self.frame_index, dt * 1000.0);
+        trace!(
+            "frame {} begin (dt {:.2} ms)",
+            self.frame_index,
+            dt * 1000.0
+        );
 
         let frame = match state.gpu.surface.acquire() {
             Acquired::Frame(frame) => frame,

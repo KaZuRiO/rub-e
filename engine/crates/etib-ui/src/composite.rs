@@ -66,7 +66,11 @@ impl Composite {
         // Source and target are the same size, so this never interpolates.
         let sampler = Sampler::new(device, "ui composite", Filter::Nearest);
         let uniforms = UniformBuffer::new(device, "ui composite params");
-        let bindings = layout.group(device, "ui composite", &[target.view(), &sampler, &uniforms]);
+        let bindings = layout.group(
+            device,
+            "ui composite",
+            &[target.view(), &sampler, &uniforms],
+        );
 
         Self {
             target,

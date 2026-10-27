@@ -149,7 +149,10 @@ impl EguiLayer {
             &screen_descriptor,
         );
         if !user_buffers.is_empty() {
-            debug!("submitting {} egui user command buffer(s)", user_buffers.len());
+            debug!(
+                "submitting {} egui user command buffer(s)",
+                user_buffers.len()
+            );
             device.raw_queue().submit(user_buffers);
         }
 

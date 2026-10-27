@@ -85,7 +85,10 @@ fn curve_from_args() -> Tonemap {
             continue;
         }
         let Some(name) = args.next() else { break };
-        match Tonemap::ALL.iter().find(|c| c.name().eq_ignore_ascii_case(&name)) {
+        match Tonemap::ALL
+            .iter()
+            .find(|c| c.name().eq_ignore_ascii_case(&name))
+        {
             Some(curve) => return *curve,
             None => info!("unknown curve {name:?}; keeping the default"),
         }
@@ -181,8 +184,13 @@ impl App for ChartApp {
         );
 
         // 2. The pass under test.
-        self.post
-            .draw(&gpu.device, encoder, view, &self.state.grade, self.state.output);
+        self.post.draw(
+            &gpu.device,
+            encoder,
+            view,
+            &self.state.grade,
+            self.state.output,
+        );
 
         // 3. The panel, composited after the grade rather than through it.
         let output = self.state.output;

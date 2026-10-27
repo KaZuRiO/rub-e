@@ -86,15 +86,11 @@ impl BindLayout {
             })
             .collect();
 
-        BindGroup(
-            device
-                .raw()
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &self.inner,
-                    entries: &entries,
-                }),
-        )
+        BindGroup(device.raw().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &self.inner,
+            entries: &entries,
+        }))
     }
 
     pub(crate) fn raw(&self) -> &wgpu::BindGroupLayout {

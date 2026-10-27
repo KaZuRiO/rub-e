@@ -66,7 +66,10 @@ impl Surface {
             "surface capabilities: formats={:?} present_modes={:?} alpha_modes={:?}",
             caps.formats, caps.present_modes, caps.alpha_modes
         );
-        debug!("surface format capabilities: {:?}", caps.format_capabilities);
+        debug!(
+            "surface format capabilities: {:?}",
+            caps.format_capabilities
+        );
 
         // What the display is currently doing, which is a different question
         // from what the surface could be configured with.
@@ -240,7 +243,9 @@ fn select_output(
         }
 
         if offered {
-            info!("extended-range surface offered, but the display reports no headroom to use it; using sRGB output");
+            info!(
+                "extended-range surface offered, but the display reports no headroom to use it; using sRGB output"
+            );
         } else {
             info!("no extended-range surface offered; using sRGB output");
         }
