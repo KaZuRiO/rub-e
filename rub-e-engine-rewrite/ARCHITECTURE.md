@@ -167,6 +167,11 @@ Events reach `App::window_event` **before** the runner acts on them, and a
 `true` return suppresses the runner's own handling (that is how egui captures a
 keystroke before Escape would close the window).
 
+Raw device events — relative mouse motion above all, which keeps arriving once
+the cursor is captured — go to `App::device_event`. They are not tied to the
+window, so nothing in the runner acts on them; an application that does
+usually checks first that it has captured the cursor.
+
 ---
 
 ## 4. The render pipeline
@@ -692,6 +697,7 @@ so a validation message, a log line and a capture all name the same thing.
 ```rust
 impl App for MyApp {
     fn window_event(&mut self, window: &Window, event: &WindowEvent) -> bool { … }
+    fn device_event(&mut self, event: &DeviceEvent) { … }             // raw mouse motion
     fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) { … }  // rebind here
     fn update(&mut self, dt: f32) { … }                             // no GPU work
     fn render(&mut self, frame: Frame<'_>) { … }                    // record passes

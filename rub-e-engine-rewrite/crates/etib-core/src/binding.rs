@@ -17,6 +17,10 @@ pub enum Stage {
     Compute,
     Vertex,
     Fragment,
+    /// Every stage: for a resource such as a camera that a compute pass, a
+    /// vertex shader and a fragment shader all read, so that one layout and
+    /// one bind group serve every pipeline that uses it.
+    All,
 }
 
 impl Stage {
@@ -25,6 +29,11 @@ impl Stage {
             Self::Compute => wgpu::ShaderStages::COMPUTE,
             Self::Vertex => wgpu::ShaderStages::VERTEX,
             Self::Fragment => wgpu::ShaderStages::FRAGMENT,
+            Self::All => {
+                wgpu::ShaderStages::COMPUTE
+                    | wgpu::ShaderStages::VERTEX
+                    | wgpu::ShaderStages::FRAGMENT
+            }
         }
     }
 }

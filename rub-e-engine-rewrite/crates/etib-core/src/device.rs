@@ -5,6 +5,8 @@ use std::sync::Arc;
 use log::{debug, info};
 
 use crate::encoder::Encoder;
+use crate::error::{Error, Result};
+use crate::instance::open_device;
 
 /// A device and its queue, cheap to clone and shared by every resource made
 /// from it.
@@ -52,6 +54,25 @@ impl Device {
             queue,
             info: Arc::new(info),
         }
+    }
+
+    /// Opens a device with no window: on whatever adapter is there, preferring
+    /// the low-power one, with the same features and limits
+    /// [`Instance::open`](crate::Instance::open) asks for.
+    ///
+    /// For tests and offscreen tools. A machine with no usable GPU gets an
+    /// `Err`, which a test can take as its cue to skip.
+    pub fn open_headless() -> Result<Self> {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|err| Error::new("no graphics adapter is available", err))?;
+        open_device(&adapter)
     }
 
     /// The graphics backend in use, formatted for display, e.g. `"Vulkan"`.

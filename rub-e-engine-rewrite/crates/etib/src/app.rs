@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result};
 use etib_core::{Acquired, Encoder, Hdr, Instance, TextureView};
 use log::{debug, error, info, trace};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
@@ -72,6 +72,13 @@ pub trait App {
     fn window_event(&mut self, _window: &Window, _event: &WindowEvent) -> bool {
         false
     }
+
+    /// Offered every raw device event, such as relative mouse motion — what
+    /// a first-person camera wants, since it keeps coming once the cursor is
+    /// captured and has stopped moving. These are not tied to the window and
+    /// arrive whether or not it has focus, so an application usually only
+    /// acts on them while it has captured the cursor.
+    fn device_event(&mut self, _event: &DeviceEvent) {}
 
     /// The surface has been reconfigured to a new, non-degenerate size.
     fn resize(&mut self, _gpu: &Gpu, _width: u32, _height: u32) {}
@@ -302,6 +309,17 @@ where
                 }
             }
             _ => {}
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let Some(state) = self.state.as_mut() {
+            state.app.device_event(&event);
         }
     }
 
