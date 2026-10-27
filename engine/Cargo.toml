@@ -1,9 +1,56 @@
 [workspace]
-members = ["etib", "etib-core"]
 resolver = "3"
+members = [
+    "crates/etib-core",
+    "crates/etib-ui",
+    "crates/etib-audio",
+    "crates/etib-scene",
+    "crates/etib-input",
+    "crates/etib-physics",
+    "crates/etib",
+    "examples",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
 
 [workspace.dependencies]
-bytemuck = { version = "1", features = ["derive"] }
-log = "0.4"
-naga = "27"
-wgpu = "27"
+etib-core = { path = "crates/etib-core" }
+etib-ui = { path = "crates/etib-ui" }
+etib-scene = { path = "crates/etib-scene" }
+etib-input = { path = "crates/etib-input" }
+etib-physics = { path = "crates/etib-physics" }
+# Its own default features are opted into by `etib`'s `clap` feature, so that
+# an application that wants no plugin loader does not link one.
+etib-audio = { path = "crates/etib-audio", default-features = false }
+
+anyhow = "1.0.104"
+# The network protocol pong shares with the engine's: bincode 1 is its wire format.
+bincode = "1.3.3"
+bytemuck = "1.25.2"
+clap = { version = "4.5.60", features = ["derive"] }
+clack-extensions = "0.2.0"
+clack-host = "0.2.0"
+clack-plugin = "0.2.0"
+cpal = "0.18.2"
+egui = "0.36.2"
+egui-wgpu = "0.36.2"
+egui-winit = "0.36.2"
+env_logger = "0.11.11"
+gilrs = "0.11.1"
+glam = "0.32.1"
+# Only the Radiance .hdr decoder, for skyboxes.
+image = { version = "0.25.9", default-features = false, features = ["hdr"] }
+log = "0.4.34"
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+pollster = "1.0.1"
+raw-window-handle = "0.6.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+# MP3 only, behind etib-audio's `mp3` feature.
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
+wgpu = "30.0.1"
+winit = "0.30.13"

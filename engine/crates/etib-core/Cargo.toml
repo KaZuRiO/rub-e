@@ -1,0 +1,11 @@
+[package]
+name = "etib-core"
+version.workspace = true
+edition.workspace = true
+description = "A thin, wgpu-free abstraction over the GPU operations the etib framework needs"
+
+[dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+log = { workspace = true }
+pollster = { workspace = true }
+wgpu = { workspace = true }

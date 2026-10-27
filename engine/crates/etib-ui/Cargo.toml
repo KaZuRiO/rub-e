@@ -1,0 +1,14 @@
+[package]
+name = "etib-ui"
+version.workspace = true
+edition.workspace = true
+description = "egui integration for etib: input plumbing and the egui paint pass"
+
+[dependencies]
+etib-core = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
+log = { workspace = true }
+winit = { workspace = true }

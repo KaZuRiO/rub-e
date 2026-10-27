@@ -1,0 +1,12 @@
+[package]
+name = "etib-scene"
+version.workspace = true
+edition.workspace = true
+description = "Cube scenes for etib: a camera, static and dynamic cube models, GPU frustum culling and an HDR skybox"
+
+[dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+etib-core = { workspace = true }
+glam = { workspace = true }
+image = { workspace = true }
+log = { workspace = true }

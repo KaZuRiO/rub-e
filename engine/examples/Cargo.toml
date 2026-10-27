@@ -1,0 +1,92 @@
+[package]
+name = "etib-examples"
+version.workspace = true
+edition.workspace = true
+description = "Every example program of the engine, from the triangle to pong"
+publish = false
+
+# Programs rather than a library's examples: they pull in what a game needs —
+# argument parsing, a network protocol, UI, sound, gamepads, a plugin host —
+# and none of it should reach the dependencies of the crates they demonstrate.
+
+# etib: the framework.
+[[bin]]
+name = "triangle"
+path = "triangle/main.rs"
+
+[[bin]]
+name = "chart"
+path = "chart/main.rs"
+
+[[bin]]
+name = "cube"
+path = "cube/main.rs"
+
+# etib-scene: the cube world.
+[[bin]]
+name = "hello"
+path = "hello/main.rs"
+
+# etib-audio: sound and CLAP instruments.
+[[bin]]
+name = "beep"
+path = "beep.rs"
+
+[[bin]]
+name = "spatial"
+path = "spatial.rs"
+
+[[bin]]
+name = "instrument"
+path = "instrument.rs"
+
+# etib-input: gamepads, without a window.
+[[bin]]
+name = "gamepads"
+path = "gamepads.rs"
+
+# The games and demos ported from the engine.
+[[bin]]
+name = "pong"
+path = "pong/main.rs"
+
+[[bin]]
+name = "physics"
+path = "physics.rs"
+
+[[bin]]
+name = "sounds"
+path = "sounds.rs"
+
+# A CLAP plugin rather than a program, for `instrument` to load: cargo leaves
+# a loadable library in target/<profile>/examples.
+[[example]]
+name = "test_instrument"
+path = "test_instrument.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = { workspace = true }
+bincode = { workspace = true }
+# For `#[derive(bytemuck::Pod)]`, which names the crate itself.
+bytemuck = { workspace = true, features = ["derive"] }
+clack-extensions = { workspace = true, features = ["clack-plugin"] }
+clack-plugin = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+etib = { path = "../crates/etib", default-features = false, features = ["ui", "audio", "clap"] }
+etib-audio = { workspace = true, features = ["clap", "mp3"] }
+etib-input = { workspace = true, features = ["gamepad"] }
+etib-physics = { workspace = true }
+etib-scene = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# The instrument example stands in for an application's event loop, which is
+# what draws a plugin's editor.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSEvent", "NSResponder"] }
+objc2-foundation = { workspace = true, features = ["NSDate", "NSRunLoop"] }

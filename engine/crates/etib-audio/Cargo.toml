@@ -1,0 +1,54 @@
+[package]
+name = "etib-audio"
+version.workspace = true
+edition.workspace = true
+description = "Sound playback for etib: a mixer over the system's default output device"
+
+[features]
+default = ["clap"]
+# Hosting CLAP instruments. Off, no plugin loader is compiled or linked, and
+# `Sound` playback is unaffected.
+clap = [
+    "dep:clack-host",
+    "dep:clack-extensions",
+    "dep:raw-window-handle",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+]
+# Decoding MP3 files into a `Sound`. Off, only WAV is read.
+mp3 = ["dep:symphonia"]
+
+[dependencies]
+clack-extensions = { workspace = true, optional = true, features = [
+    "clack-host",
+    "audio-ports",
+    "gui",
+    "log",
+    "note-ports",
+    "params",
+    "raw-window-handle_06",
+    "thread-check",
+    "timer",
+] }
+clack-host = { workspace = true, optional = true }
+cpal = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+symphonia = { workspace = true, optional = true }
+# The type a caller hands over to have a plugin's editor put in their own
+# window. The same version winit uses, so one can be passed straight in.
+raw-window-handle = { workspace = true, optional = true }
+
+# For the debug window this crate opens when a plugin will only embed its
+# editor. Only that: nothing else here touches the platform's windowing.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true, optional = true }
+objc2-app-kit = { workspace = true, optional = true, features = [
+    "NSApplication",
+    "NSGraphics",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { workspace = true, optional = true, features = ["NSGeometry"] }
