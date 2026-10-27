@@ -83,18 +83,67 @@ impl TextureView {
     }
 }
 
+/// What the three window-sized textures share: the texture, its view, and the
+/// size and label it was last created with.
+struct Target {
+    /// Held so the view stays valid.
+    _texture: wgpu::Texture,
+    view: TextureView,
+    size: (u32, u32),
+    label: String,
+}
+
+impl Target {
+    fn new(
+        texture: wgpu::Texture,
+        view: TextureView,
+        label: &str,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            _texture: texture,
+            view,
+            size: (width, height),
+            label: label.to_owned(),
+        }
+    }
+
+    /// Recreates the texture through `create` at a new size. Returns `true`
+    /// when it actually changed, which is the caller's cue to rebuild its bind
+    /// groups; an unchanged or degenerate size is ignored.
+    fn resize(
+        &mut self,
+        device: &Device,
+        kind: &str,
+        width: u32,
+        height: u32,
+        create: impl Fn(&Device, &str, u32, u32) -> (wgpu::Texture, TextureView),
+    ) -> bool {
+        if width == 0 || height == 0 || (width, height) == self.size {
+            return false;
+        }
+
+        debug!(
+            "recreating {kind} texture '{}' {}x{} -> {width}x{height}",
+            self.label, self.size.0, self.size.1
+        );
+        let (texture, view) = create(device, &self.label, width, height);
+        self._texture = texture;
+        self.view = view;
+        self.size = (width, height);
+        true
+    }
+}
+
 /// An offscreen texture a compute shader writes and a later pass samples.
 ///
 /// Resizing recreates the texture and its view, so anything holding a bind
 /// group over the view has to rebuild it; [`StorageTexture::resize`] reports
 /// when that is needed.
 pub struct StorageTexture {
-    /// Held so the view stays valid.
-    _texture: wgpu::Texture,
-    view: TextureView,
+    target: Target,
     format: StorageFormat,
-    size: (u32, u32),
-    label: String,
 }
 
 impl StorageTexture {
@@ -107,17 +156,14 @@ impl StorageTexture {
     ) -> Self {
         let (texture, view) = create(device, label, width, height, format);
         Self {
-            _texture: texture,
-            view,
+            target: Target::new(texture, view, label, width, height),
             format,
-            size: (width, height),
-            label: label.to_owned(),
         }
     }
 
     /// The view to bind, both for the compute write and the sampled read.
     pub fn view(&self) -> &TextureView {
-        &self.view
+        &self.target.view
     }
 
     pub fn format(&self) -> StorageFormat {
@@ -125,26 +171,21 @@ impl StorageTexture {
     }
 
     pub fn size(&self) -> (u32, u32) {
-        self.size
+        self.target.size
     }
 
     /// Recreates the texture at a new size. Returns `true` when it actually
     /// changed, which is the caller's cue to rebuild its bind groups; an
     /// unchanged or degenerate size is ignored.
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) -> bool {
-        if width == 0 || height == 0 || (width, height) == self.size {
-            return false;
-        }
-
-        debug!(
-            "recreating storage texture '{}' {}x{} -> {width}x{height}",
-            self.label, self.size.0, self.size.1
-        );
-        let (texture, view) = create(device, &self.label, width, height, self.format);
-        self._texture = texture;
-        self.view = view;
-        self.size = (width, height);
-        true
+        let format = self.format;
+        self.target.resize(
+            device,
+            "storage",
+            width,
+            height,
+            |device, label, width, height| create(device, label, width, height, format),
+        )
     }
 }
 
@@ -222,12 +263,8 @@ fn create(
 /// pass rather than a compute one — an interface drawn separately and
 /// composited, say, or an intermediate in a chain of screen passes.
 pub struct RenderTexture {
-    /// Held so the view stays valid.
-    _texture: wgpu::Texture,
-    view: TextureView,
+    target: Target,
     format: TextureFormat,
-    size: (u32, u32),
-    label: String,
 }
 
 impl RenderTexture {
@@ -240,17 +277,14 @@ impl RenderTexture {
     ) -> Self {
         let (texture, view) = create_render_target(device, label, width, height, format);
         Self {
-            _texture: texture,
-            view,
+            target: Target::new(texture, view, label, width, height),
             format,
-            size: (width, height),
-            label: label.to_owned(),
         }
     }
 
     /// The view, both as a pass target and as a binding to sample.
     pub fn view(&self) -> &TextureView {
-        &self.view
+        &self.target.view
     }
 
     pub fn format(&self) -> TextureFormat {
@@ -258,25 +292,22 @@ impl RenderTexture {
     }
 
     pub fn size(&self) -> (u32, u32) {
-        self.size
+        self.target.size
     }
 
     /// Recreates the texture at a new size, returning `true` when it actually
     /// changed and bind groups over the view have to be rebuilt.
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) -> bool {
-        if width == 0 || height == 0 || (width, height) == self.size {
-            return false;
-        }
-
-        debug!(
-            "recreating render texture '{}' {}x{} -> {width}x{height}",
-            self.label, self.size.0, self.size.1
-        );
-        let (texture, view) = create_render_target(device, &self.label, width, height, self.format);
-        self._texture = texture;
-        self.view = view;
-        self.size = (width, height);
-        true
+        let format = self.format;
+        self.target.resize(
+            device,
+            "render",
+            width,
+            height,
+            |device, label, width, height| {
+                create_render_target(device, label, width, height, format)
+            },
+        )
     }
 }
 
@@ -400,11 +431,7 @@ impl Texture3d {
 /// resizes with the colour target it is paired with, and like the other
 /// window-sized textures reports when it actually did.
 pub struct DepthTexture {
-    /// Held so the view stays valid.
-    _texture: wgpu::Texture,
-    view: TextureView,
-    size: (u32, u32),
-    label: String,
+    target: Target,
 }
 
 impl DepthTexture {
@@ -413,38 +440,24 @@ impl DepthTexture {
     pub fn new(device: &Device, label: &str, width: u32, height: u32) -> Self {
         let (texture, view) = create_depth(device, label, width, height);
         Self {
-            _texture: texture,
-            view,
-            size: (width, height),
-            label: label.to_owned(),
+            target: Target::new(texture, view, label, width, height),
         }
     }
 
     /// The view, as a depth attachment or as a binding to sample.
     pub fn view(&self) -> &TextureView {
-        &self.view
+        &self.target.view
     }
 
     pub fn size(&self) -> (u32, u32) {
-        self.size
+        self.target.size
     }
 
     /// Recreates the texture at a new size, returning `true` when it actually
     /// changed; an unchanged or degenerate size is ignored.
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) -> bool {
-        if width == 0 || height == 0 || (width, height) == self.size {
-            return false;
-        }
-
-        debug!(
-            "recreating depth texture '{}' {}x{} -> {width}x{height}",
-            self.label, self.size.0, self.size.1
-        );
-        let (texture, view) = create_depth(device, &self.label, width, height);
-        self._texture = texture;
-        self.view = view;
-        self.size = (width, height);
-        true
+        self.target
+            .resize(device, "depth", width, height, create_depth)
     }
 }
 
@@ -758,6 +771,26 @@ mod gpu_tests {
         assert!(!depth.resize(&device, 0, 32), "degenerate size");
         assert!(depth.resize(&device, 128, 64));
         assert_eq!(depth.size(), (128, 64));
+    }
+
+    #[test]
+    fn storage_and_render_textures_resize_only_when_they_have_to() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        let mut storage =
+            StorageTexture::new(&device, "test storage", 64, 32, StorageFormat::Rgba16Float);
+        assert!(!storage.resize(&device, 64, 32), "same size");
+        assert!(!storage.resize(&device, 0, 32), "degenerate size");
+        assert!(storage.resize(&device, 128, 64));
+        assert_eq!(storage.size(), (128, 64));
+
+        let mut render =
+            RenderTexture::new(&device, "test render", 64, 32, TextureFormat::RGBA8_SRGB);
+        assert!(!render.resize(&device, 64, 32), "same size");
+        assert!(!render.resize(&device, 64, 0), "degenerate size");
+        assert!(render.resize(&device, 128, 64));
+        assert_eq!(render.size(), (128, 64));
     }
 
     #[test]

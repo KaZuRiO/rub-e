@@ -16,7 +16,19 @@ pub struct UniformBuffer<T> {
 }
 
 impl<T: Pod> UniformBuffer<T> {
+    /// A buffer for one `T`, uninitialised until the first
+    /// [`write`](Self::write).
+    ///
+    /// WGSL rounds a uniform struct up to a multiple of 16 bytes, so a `T`
+    /// whose size is not one is refused at compile time: its fields would not
+    /// line up with the shader's.
     pub fn new(device: &Device, label: &str) -> Self {
+        const {
+            assert!(
+                size_of::<T>().is_multiple_of(16),
+                "a uniform struct's size must be a multiple of 16 bytes (WGSL alignment)"
+            );
+        }
         let buffer = device.raw().create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: size_of::<T>() as u64,
