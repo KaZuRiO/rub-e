@@ -11,7 +11,7 @@ use glam::Mat4;
 use crate::camera::{Camera, CameraRaw};
 use crate::cube::{CubeRaw, INDICES, VERTICES, Vertex};
 use crate::culling::{CullingPasses, StaticCubes};
-use crate::dynamic::{DynamicModel, DynamicModels};
+use crate::dynamic::{DynamicId, DynamicModel, DynamicModels};
 use crate::error::Result;
 use crate::model::ModelCube;
 use crate::skybox::Skybox;
@@ -143,26 +143,27 @@ impl Scene {
 
     /// Adds a dynamic model and returns the id that moves or removes it.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If the dynamic models would hold more cubes than the scene was built
-    /// with room for.
-    pub fn add_dynamic(&mut self, model: DynamicModel) -> usize {
+    /// [`Error::Capacity`](crate::Error::Capacity) if the dynamic models would
+    /// hold more cubes than the scene was built with room for; nothing is
+    /// added then.
+    pub fn add_dynamic(&mut self, model: DynamicModel) -> Result<DynamicId> {
         self.dynamic.add(model)
     }
 
-    /// Removes a dynamic model; an unknown id is ignored.
-    pub fn remove_dynamic(&mut self, id: usize) {
+    /// Removes a dynamic model; a stale id is ignored.
+    pub fn remove_dynamic(&mut self, id: DynamicId) {
         self.dynamic.remove(id);
     }
 
-    pub fn dynamic(&self, id: usize) -> Option<&DynamicModel> {
+    pub fn dynamic(&self, id: DynamicId) -> Option<&DynamicModel> {
         self.dynamic.get(id)
     }
 
     /// The model, to move or recolour. Changes are uploaded by the next
     /// [`render`](Self::render).
-    pub fn dynamic_mut(&mut self, id: usize) -> Option<&mut DynamicModel> {
+    pub fn dynamic_mut(&mut self, id: DynamicId) -> Option<&mut DynamicModel> {
         self.dynamic.get_mut(id)
     }
 
@@ -319,9 +320,10 @@ mod tests {
     fn dynamic_models_are_added_moved_and_removed() {
         let Some(device) = device() else { return };
         let mut scene = Scene::new(&device, &[], 10, 800, 600);
-        let id = scene.add_dynamic(DynamicModel::from_cubes(vec![white_cube(0.0, 0.0, 0.0)]));
+        let id = scene
+            .add_dynamic(DynamicModel::from_cubes(vec![white_cube(0.0, 0.0, 0.0)]))
+            .unwrap();
         assert_eq!(scene.dynamic_count(), 1);
-        assert!(scene.dynamic(999).is_none());
 
         scene.dynamic_mut(id).unwrap().position = Vec3::new(5.0, 0.0, 0.0);
         assert_eq!(
@@ -336,7 +338,7 @@ mod tests {
 
         scene.remove_dynamic(id);
         assert!(scene.dynamic(id).is_none());
-        scene.remove_dynamic(999);
+        scene.remove_dynamic(id);
     }
 
     #[test]
@@ -346,7 +348,9 @@ mod tests {
             .map(|i| white_cube((i % 10) as f32 * 4.0, 0.0, (i / 10) as f32 * 4.0))
             .collect();
         let mut scene = Scene::new(&device, &cubes, 4, 64, 64);
-        scene.add_dynamic(DynamicModel::from_cubes(vec![white_cube(0.0, 2.0, 0.0); 4]));
+        scene
+            .add_dynamic(DynamicModel::from_cubes(vec![white_cube(0.0, 2.0, 0.0); 4]))
+            .unwrap();
         scene
             .set_skybox_from_hdr(&device, &tiny_hdr(), 16, Mat4::IDENTITY)
             .expect("the skybox loads");

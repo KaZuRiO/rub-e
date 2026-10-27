@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Something a model file or a skybox image could not be loaded from.
+/// Something a scene could not load, or could not make room for.
 ///
 /// GPU work is not in here: building a scene cannot fail once the device is
 /// open, and a shader that does not compile is a bug, which panics.
@@ -29,6 +29,9 @@ pub enum Error {
     Image {
         source: Box<dyn StdError + Send + Sync>,
     },
+    /// A dynamic model that would take the scene past the number of dynamic
+    /// cubes it was built with room for.
+    Capacity { needed: usize, capacity: usize },
 }
 
 impl fmt::Display for Error {
@@ -37,6 +40,10 @@ impl fmt::Display for Error {
             Self::Io { path, .. } => write!(f, "could not access '{}'", path.display()),
             Self::Parse { line, .. } => write!(f, "line {line} of the model holds a bad number"),
             Self::Image { .. } => f.write_str("the skybox image could not be decoded"),
+            Self::Capacity { needed, capacity } => write!(
+                f,
+                "the dynamic models would hold {needed} cubes, but the scene has room for {capacity}"
+            ),
         }
     }
 }
@@ -47,6 +54,7 @@ impl StdError for Error {
             Self::Io { source, .. } => Some(source),
             Self::Parse { source, .. } => Some(source),
             Self::Image { source } => Some(source.as_ref()),
+            Self::Capacity { .. } => None,
         }
     }
 }

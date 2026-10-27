@@ -38,8 +38,8 @@ use etib::{App, Frame, Gpu, Grade, Hdr, Output, PostProcess, Vsync};
 use etib_input::{Input, KeyCode};
 use etib_scene::glam::{Mat4, Quat, Vec3};
 use etib_scene::{
-    Camera, CameraController, CameraMode, DynamicModel, ModelCube, Move, Projection, Scene,
-    load_model,
+    Camera, CameraController, CameraMode, DynamicId, DynamicModel, ModelCube, Move, Projection,
+    Scene, load_model,
 };
 use log::info;
 
@@ -140,7 +140,7 @@ struct HelloApp {
     post: PostProcess,
     grade: Grade,
     output: Output,
-    orbiting: usize,
+    orbiting: DynamicId,
     cursor_captured: bool,
     elapsed: f32,
     /// Seconds since the title and the display were last refreshed.
@@ -158,7 +158,9 @@ impl HelloApp {
         let aspect = width as f32 / height as f32;
 
         let mut scene = Scene::new(&gpu.device, static_cubes, cat.len(), width, height);
-        let orbiting = scene.add_dynamic(DynamicModel::from_cubes(cat.to_vec()));
+        let orbiting = scene
+            .add_dynamic(DynamicModel::from_cubes(cat.to_vec()))
+            .expect("the scene has room for the cat");
         scene
             .set_skybox_from_hdr(&gpu.device, SKY, SKY_FACE, Mat4::IDENTITY)
             .context("loading the skybox")?;

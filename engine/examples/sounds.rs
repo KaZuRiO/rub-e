@@ -56,10 +56,12 @@ impl SoundsDemo {
         scene
             .set_skybox_from_hdr(&gpu.device, SKY, SKY_FACE, Mat4::IDENTITY)
             .context("loading the skybox")?;
-        scene.add_dynamic(DynamicModel::from_cubes(vec![ModelCube {
-            position: Vec3::ZERO,
-            color: Vec3::new(1.0, 0.2, 0.2),
-        }]));
+        scene
+            .add_dynamic(DynamicModel::from_cubes(vec![ModelCube {
+                position: Vec3::ZERO,
+                color: Vec3::new(1.0, 0.2, 0.2),
+            }]))
+            .expect("the scene has room for the cube");
 
         // The emitter sits on the cube, which does not move.
         let mut sounds = SoundManager::new(Audio::new_or_silent());
