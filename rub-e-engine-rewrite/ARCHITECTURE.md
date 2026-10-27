@@ -58,7 +58,7 @@ Neither draws anything, so neither needs a device.
 | `etib-input` | Keyboard, mouse and gamepad state, fed from winit events and cleared once per frame | the GPU, the window, the frame loop and `App` — an application feeds it; gilrs, unless the `gamepad` feature is on |
 | `etib-physics` | Rigid bodies for cubes: gravity, spin, floor and wall contacts, cube-to-cube impulses, settling onto a face | the GPU, the window and the scene — it moves a position and a rotation the caller owns |
 | `etib-ui` | egui integration and the interface composite | the frame loop — it is usable with a loop of your own |
-| `etib-audio` | The output device, the mixer, sounds in memory, and CLAP instruments | everything else in the workspace, the GPU included |
+| `etib-audio` | The output device, the mixer, sounds in memory, sounds placed in the world, and CLAP instruments | everything else in the workspace, the GPU included |
 
 **wgpu is an implementation detail of `etib-core`.** Nothing in its API takes or
 returns a wgpu type, the errors are its own, and the async device handshake is
@@ -456,6 +456,34 @@ way in. Anything that would have to be guessed at rather than read — a
 compressed payload, more than two channels — is refused with a message saying
 which it was, on the same principle as the `.cube` parser.
 
+`Sound::from_mp3`, behind the `mp3` feature, decodes an MP3 in full through
+symphonia (its MP3 decoder only). A damaged frame is skipped, as a player would.
+
+### Sounds in the world
+
+The engine placed sounds through kira's spatial tracks. Here that is a layer
+above `Voice`, entirely on the application's thread:
+
+```text
+  every frame, from App::update
+  SoundManager::update(Listener::looking_at(camera.eye, camera.target))
+    ├─ each SoundGroup: SoundStrategy::compute_emitters(cubes, listener) → position, volume
+    └─ each SpatialVoice: spatialize(listener, position) → Placement { gain, pan }
+         └─ Voice::set_gain(volume × gain), Voice::set_pan(pan)     two atomics
+```
+
+`spatialize` is kira's model, kept so the scenes sound as they did: the level
+falls linearly in decibels from full at `Spatial::min_distance` (1) to -60 dB,
+silence, at `max_distance` (100), and each ear — 0.2 apart, turned π/8 forward
+— hears `(1 - strength) + strength · (facing · direction + 1) / 2` of it, with
+kira's `strength` of 0.75. The two ear levels become one gain and one pan under
+the mixer's pan law: the louder ear sets the gain, the ratio sets the pan.
+
+So nothing was added to the mixing path, which still only reads a gain and a
+pan per voice. A one-shot is let go when its `Voice` stops playing, and a
+`SoundGroup` stops its loop when dropped, as a kira track did; a bare
+`SpatialVoice`, like a `Voice`, does not.
+
 ---
 
 ### Instruments
@@ -786,6 +814,10 @@ The two examples are the reference:
   controls do to them. It opens no window, so it is also the quickest way to
   hear whether a machine's audio works at all:
   `cargo run -p etib-audio --example beep`.
+- **`etib-audio/examples/spatial`** — a sound circling the listener, then
+  walking away until it fades out; with headphones, the quickest check of the
+  spatial layer. `cargo run -p etib-audio --example spatial`, or
+  `--features mp3 -- file.mp3` to circle a file.
 - **`examples/cube`** — 4096 instanced cubes, depth-tested into an
   `Rgba16Float` render texture and tone mapped by `PostProcess`. The
   smallest use of the raster side: the instances live in a `StorageBuffer` and
@@ -852,6 +884,9 @@ shared between them by `#[path]`.
 | `crates/etib-audio/src/mixer.rs` | The audio thread's half: voices, resampling, summing |
 | `crates/etib-audio/src/sound.rs` | `Sound`, `Waveform`, tone generation |
 | `crates/etib-audio/src/wav.rs` | The WAV reader |
+| `crates/etib-audio/src/mp3.rs` | `Sound::from_mp3`, behind the `mp3` feature |
+| `crates/etib-audio/src/spatial/mod.rs` | `Listener`, `Spatial`, `spatialize`, `SpatialVoice` |
+| `crates/etib-audio/src/spatial/{strategy,group,manager}.rs` | `SoundStrategy`, `SoundGroup`, `SoundManager`: the engine's spatial sound |
 | `crates/etib-audio/src/instrument/mod.rs` | `Instrument`, `InstrumentConfig`, `Gui`; loading and unloading |
 | `crates/etib-audio/src/instrument/host.rs` | What a CLAP plugin may ask of this host, and on which thread |
 | `crates/etib-audio/src/instrument/processor.rs` | A plugin's audio half: events in, a block out |
@@ -900,6 +935,9 @@ shared between them by `#[path]`.
   too.
 - **Shaders compile when the module is created, and panic on failure** — a WGSL
   typo is a startup crash, not a runtime error you can handle.
+- **Spatial sound is worked out on the application's thread.** A
+  `SpatialVoice` only ever sets a voice's gain and pan, once a frame; the
+  listener never reaches the audio thread.
 - **The audio thread never allocates, locks, logs or frees.** Anything added to
   the mixing path has to hold to that, including what it drops. A plugin's own
   `log` calls are the single exception, and they are the plugin's choice.

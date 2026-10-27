@@ -54,11 +54,36 @@
 //! # What it is not
 //!
 //! There is no streaming, so a long piece of music is decoded in full before
-//! the first sample is heard; no compressed formats, so an effect is a WAV
-//! file; no positioning beyond a pan between the ears; and no effects, so
-//! nothing is filtered or reverberated on its way out. Each of those is a
+//! the first sample is heard; no compressed format but MP3, behind the `mp3`
+//! feature; positioning is a level and a pan worked out on the application's
+//! thread (below), not a 3D renderer; and no effects, so nothing is filtered or
+//! reverberated on its way out. Each of those is a
 //! different library, and this is meant to be the one that is not needed when
 //! all an application wants is to make a noise.
+//!
+//! # Sounds in the world
+//!
+//! A [`SpatialVoice`] is a [`Voice`] with a position. Once a frame it is told
+//! where the [`Listener`] is, and turns distance and direction into the gain
+//! and pan it sends the mixer — the same two controls any sound has, so the
+//! mixing path is untouched. [`SoundManager`] keeps the listener, looping
+//! [`SoundGroup`]s placed by a [`SoundStrategy`], and one-shot effects: the
+//! engine's spatial sound, without kira.
+//!
+//! ```no_run
+//! # use etib_audio::{Audio, Listener, SingleCubeStrategy, Sound, SoundManager};
+//! # use etib_audio::glam::Vec3;
+//! # fn main() -> etib_audio::Result<()> {
+//! let mut sounds = SoundManager::new(Audio::new_or_silent());
+//! let hum = Sound::from_wav_file("hum.wav")?;
+//! sounds.add_group(vec![Vec3::new(10.0, 0.0, 0.0)], &hum, Box::new(SingleCubeStrategy));
+//!
+//! // Every frame, from the camera.
+//! # let (eye, target) = (Vec3::ZERO, Vec3::NEG_Z);
+//! sounds.update(Listener::looking_at(eye, target));
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # Where it sits
 //!
@@ -126,12 +151,19 @@ mod error;
 #[cfg(feature = "clap")]
 mod instrument;
 mod mixer;
+#[cfg(feature = "mp3")]
+mod mp3;
 mod sound;
+mod spatial;
 mod wav;
 
 pub use engine::{Audio, Play, Voice};
 pub use error::{Error, Result};
 pub use sound::{Sound, Waveform};
+pub use spatial::{
+    EmitterState, Listener, Placement, SingleCubeStrategy, SoundGroup, SoundManager, SoundStrategy,
+    Spatial, SpatialVoice, attenuation, spatialize,
+};
 
 #[cfg(feature = "clap")]
 pub use instrument::{Gui, Instrument, InstrumentConfig, ParamInfo, PluginInfo, plugins_in};
@@ -143,3 +175,4 @@ pub use mixer::MAX_VOICES;
 // Re-exported so an application can name the backend's types — to enumerate
 // devices, say — without a second, mismatched copy of it in its tree.
 pub use cpal;
+pub use glam;

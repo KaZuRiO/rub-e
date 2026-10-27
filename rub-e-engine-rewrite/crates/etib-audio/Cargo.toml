@@ -16,6 +16,8 @@ clap = [
     "dep:objc2-app-kit",
     "dep:objc2-foundation",
 ]
+# Decoding MP3 files into a `Sound`. Off, only WAV is read.
+mp3 = ["dep:symphonia"]
 
 [dependencies]
 clack-extensions = { workspace = true, optional = true, features = [
@@ -31,7 +33,9 @@ clack-extensions = { workspace = true, optional = true, features = [
 ] }
 clack-host = { workspace = true, optional = true }
 cpal = { workspace = true }
+glam = { workspace = true }
 log = { workspace = true }
+symphonia = { workspace = true, optional = true }
 # The type a caller hands over to have a plugin's editor put in their own
 # window. The same version winit uses, so one can be passed straight in.
 raw-window-handle = { workspace = true, optional = true }
@@ -67,6 +71,10 @@ objc2-foundation = { workspace = true, features = ["NSDate", "NSRunLoop"] }
 [[example]]
 name = "beep"
 path = "examples/beep.rs"
+
+[[example]]
+name = "spatial"
+path = "examples/spatial.rs"
 
 [[example]]
 name = "instrument"
