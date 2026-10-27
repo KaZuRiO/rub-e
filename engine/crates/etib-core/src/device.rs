@@ -100,6 +100,27 @@ impl Device {
         self.queue.submit(Some(encoder.finish()));
     }
 
+    /// Runs `create` inside a validation error scope, and panics naming the
+    /// object if the backend refused it.
+    ///
+    /// Without the scope a validation error goes to the uncaptured-error
+    /// handler, which only logs: an invalid shader would leave a running
+    /// program drawing nothing. Shaders, pipelines and bind groups are fixed
+    /// by the program rather than by its input, so a refused one is a bug.
+    pub(crate) fn checked<T>(
+        &self,
+        what: &str,
+        label: &str,
+        create: impl FnOnce(&wgpu::Device) -> T,
+    ) -> T {
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let created = create(&self.device);
+        if let Some(error) = pollster::block_on(scope.pop()) {
+            panic!("{what} '{label}' is invalid: {error}");
+        }
+        created
+    }
+
     // -- Interop ------------------------------------------------------------
     //
     // The wrappers above cover everything this workspace needs. These hand out

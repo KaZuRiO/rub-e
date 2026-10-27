@@ -34,16 +34,16 @@ impl ComputePipeline {
     ) -> Self {
         let pipeline_layout = create_layout(device, label, layouts);
 
-        let pipeline = device
-            .raw()
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = device.checked("compute pipeline", label, |raw| {
+            raw.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
                 module: shader.raw(),
                 entry_point: Some(entry_point),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            })
+        });
         info!("compute pipeline '{label}' created");
 
         Self(pipeline)
@@ -107,9 +107,8 @@ impl RenderPipeline {
 
         let pipeline_layout = create_layout(device, label, &[layout]);
 
-        let pipeline = device
-            .raw()
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.checked("render pipeline", label, |raw| {
+            raw.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -139,7 +138,8 @@ impl RenderPipeline {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            })
+        });
         info!("render pipeline '{label}' created for target {target:?}");
 
         Self(pipeline)
@@ -172,9 +172,8 @@ impl RenderPipeline {
             })
             .collect();
 
-        let pipeline = device
-            .raw()
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.checked("render pipeline", label, |raw| {
+            raw.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -209,7 +208,8 @@ impl RenderPipeline {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            })
+        });
         info!(
             "raster pipeline '{label}' created for target {:?}{}",
             desc.target,
@@ -412,6 +412,34 @@ mod tests {
     };
     use crate::encoder::{Color, DepthLoad, Load};
     use crate::test_util;
+
+    const EMPTY_COMPUTE: &str = "@compute @workgroup_size(1) fn main() {}";
+
+    #[test]
+    fn a_missing_entry_point_panics_with_the_pipeline_label() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        let shader = Shader::wgsl(&device, "empty", EMPTY_COMPUTE);
+        let layout = BindLayout::build(&device, "empty").finish();
+        let msg = test_util::panic_message(|| {
+            ComputePipeline::new(&device, "missing", &shader, "nope", &layout);
+        });
+        assert!(
+            msg.starts_with("compute pipeline 'missing' is invalid"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_valid_shader_and_pipeline_do_not_panic() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        let shader = Shader::wgsl(&device, "empty", EMPTY_COMPUTE);
+        let layout = BindLayout::build(&device, "empty").finish();
+        ComputePipeline::new(&device, "fine", &shader, "main", &layout);
+    }
     use crate::texture::{RenderTexture, StorageFormat};
 
     #[test]

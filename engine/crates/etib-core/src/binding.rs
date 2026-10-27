@@ -86,10 +86,12 @@ impl BindLayout {
             })
             .collect();
 
-        BindGroup(device.raw().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(label),
-            layout: &self.inner,
-            entries: &entries,
+        BindGroup(device.checked("bind group", label, |raw| {
+            raw.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &self.inner,
+                entries: &entries,
+            })
         }))
     }
 
@@ -220,10 +222,11 @@ impl BindLayoutBuilder<'_> {
         );
         let inner = self
             .device
-            .raw()
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some(&self.label),
-                entries: &self.entries,
+            .checked("bind group layout", &self.label, |raw| {
+                raw.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some(&self.label),
+                    entries: &self.entries,
+                })
             });
         BindLayout {
             inner,

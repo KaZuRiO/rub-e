@@ -766,8 +766,10 @@ the backend's error as its `source`, so `{:#}` under anyhow prints the chain.
 not make its callers match on cpal's errors or the filesystem's. The `etib`
 layer uses anyhow directly. A shader that fails to compile *panics* rather
 than returning `Err`: shaders are compiled into the binary, so a bad one is a
-bug, not a runtime condition. An uncaptured GPU error is logged by a handler
-installed with the device.
+bug, not a runtime condition. The same goes for pipelines, bind group layouts
+and bind groups: each is created inside a validation error scope
+(`Device::checked`), and the panic names the object and its label. Any other
+GPU error goes to a handler installed with the device, which logs it.
 
 **Logging.** Everything goes through the `log` facade and no crate installs a
 logger. `info` for adapter, surface, device and pipeline lifecycle; `debug` for
@@ -969,7 +971,8 @@ the binaries with `include_bytes!` so nothing has to be found at runtime.
 - **A LUT is indexed in gamma-encoded space**, and its entries are gamma-encoded
   too.
 - **Shaders compile when the module is created, and panic on failure** — a WGSL
-  typo is a startup crash, not a runtime error you can handle.
+  typo is a startup crash naming the shader, not a runtime error you can
+  handle. Pipelines and bind groups the backend refuses panic the same way.
 - **Spatial sound is worked out on the application's thread.** A
   `SpatialVoice` only ever sets a voice's gain and pan, once a frame; the
   listener never reaches the audio thread.

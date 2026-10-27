@@ -25,3 +25,18 @@ pub fn device() -> Option<Device> {
         }
     }
 }
+
+/// What `f` panicked with, for a test that expects it to.
+///
+/// # Panics
+///
+/// If `f` returns rather than panicking.
+pub fn panic_message(f: impl FnOnce()) -> String {
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .expect_err("expected a panic, but it returned");
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(ToString::to_string))
+        .unwrap_or_default()
+}
