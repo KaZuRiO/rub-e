@@ -772,7 +772,9 @@ use the long form: `set_pipeline`, `set_bind_group(index, …)`, then
 the backend's error as its `source`, so `{:#}` under anyhow prints the chain.
 `etib-audio` has the same arrangement for the same reason — a leaf crate should
 not make its callers match on cpal's errors or the filesystem's. The `etib`
-layer uses anyhow directly. A shader that fails to compile *panics* rather
+layer uses anyhow only where it meets the application — `run` and the `build`
+closure — and gives its parser its own: `Lut::from_cube` returns a `LutError`
+that says which refusal it is. A shader that fails to compile *panics* rather
 than returning `Err`: shaders are compiled into the binary, so a bad one is a
 bug, not a runtime condition. The same goes for pipelines, bind group layouts
 and bind groups: each is created inside a validation error scope

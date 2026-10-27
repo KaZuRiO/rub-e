@@ -105,12 +105,14 @@ mod app;
 mod blit;
 mod gpu;
 mod lut;
+mod lut_error;
 mod post;
 
 pub use app::{App, Config, Frame, FrameStats, MAX_DT, run};
 pub use blit::Blit;
 pub use gpu::Gpu;
 pub use lut::Lut;
+pub use lut_error::LutError;
 pub use post::{Grade, PostProcess, Tonemap};
 
 /// The GPU layer this framework is built on.
