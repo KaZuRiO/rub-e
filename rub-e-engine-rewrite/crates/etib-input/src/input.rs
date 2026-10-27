@@ -28,6 +28,10 @@ const PIXELS_PER_LINE: f32 = 10.0;
 /// It consumes nothing: whether an event was used is for the application to
 /// answer from `App::window_event`. When the window loses focus, everything
 /// held is released, since the releases would go to another window.
+///
+/// With the `gamepad` feature, each `Input` opens its own gilrs context, which
+/// on Linux starts a hotplug thread and opens the input devices: keep one per
+/// application.
 #[derive(Debug, Default)]
 pub struct Input {
     keys: Held<KeyCode>,

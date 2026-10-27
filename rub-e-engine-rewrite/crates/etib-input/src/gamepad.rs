@@ -36,10 +36,11 @@ impl Gamepads {
     pub fn new() -> Self {
         let gilrs = match Gilrs::new() {
             Ok(gilrs) => gilrs,
-            // gilrs hands over a context that works but never sees a gamepad.
-            Err(gilrs::Error::NotImplemented(dummy)) => {
+            // gilrs offers a stand-in context here, but it never sees a
+            // gamepad, so there is nothing to keep it for.
+            Err(gilrs::Error::NotImplemented(_)) => {
                 warn!("gamepads are not supported on this platform");
-                dummy
+                return Self::unavailable();
             }
             Err(err) => {
                 warn!("gamepads unavailable: {err}");
@@ -129,19 +130,24 @@ impl Gamepad<'_> {
         self.pad.name()
     }
 
-    /// Whether `button` is held down.
+    /// Whether `button` is held down. `Button::Unknown` never is.
     pub fn is_pressed(&self, button: Button) -> bool {
-        self.pad.is_pressed(button)
+        // gilrs asserts against being asked about it.
+        button != Button::Unknown && self.pad.is_pressed(button)
     }
 
-    /// Whether `button` went down this frame.
+    /// Whether `button` went down this frame. `Button::Unknown` never does.
     pub fn is_just_pressed(&self, button: Button) -> bool {
-        self.buttons.just_pressed((self.pad.id(), button))
+        button != Button::Unknown && self.buttons.just_pressed((self.pad.id(), button))
     }
 
     /// Where `axis` is, in -1..1 for a stick and 0..1 for a trigger, with the
-    /// [`DEADZONE`] applied.
+    /// [`DEADZONE`] applied. `Axis::Unknown` reads 0.
     pub fn axis(&self, axis: Axis) -> f32 {
+        // gilrs asserts against being asked about it.
+        if axis == Axis::Unknown {
+            return 0.0;
+        }
         deadzone(self.pad.value(axis))
     }
 }
