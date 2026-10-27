@@ -313,10 +313,8 @@ where
                 info!("close requested; shutting down");
                 event_loop.exit();
             }
-            WindowEvent::Resized(size) => {
-                if state.gpu.surface.resize(size.width, size.height) {
-                    state.app.resize(&state.gpu, size.width, size.height);
-                }
+            WindowEvent::Resized(size) if state.gpu.surface.resize(size.width, size.height) => {
+                state.app.resize(&state.gpu, size.width, size.height);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 info!("scale factor changed to {scale_factor:.2}");

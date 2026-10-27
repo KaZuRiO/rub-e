@@ -245,21 +245,12 @@ impl Scene {
 
 #[cfg(test)]
 mod tests {
+    use etib_core::test_util::device;
     use etib_core::wgpu;
     use glam::Vec3;
 
     use super::*;
     use crate::camera::Projection;
-
-    fn device() -> Option<Device> {
-        match Device::open_headless() {
-            Ok(device) => Some(device),
-            Err(err) => {
-                eprintln!("skipping: {err}");
-                None
-            }
-        }
-    }
 
     fn white_cube(x: f32, y: f32, z: f32) -> ModelCube {
         ModelCube {
