@@ -28,6 +28,7 @@ winit = { workspace = true }
 [dev-dependencies]
 # Used by the examples only; a library has no business installing a logger.
 env_logger = { workspace = true }
+glam = { workspace = true }
 
 [[example]]
 name = "triangle"
@@ -40,3 +41,7 @@ name = "chart"
 path = "examples/chart/main.rs"
 # Draws its own control panel, like the triangle.
 required-features = ["ui"]
+
+[[example]]
+name = "cube"
+path = "examples/cube/main.rs"
