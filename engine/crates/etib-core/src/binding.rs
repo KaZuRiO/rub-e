@@ -79,7 +79,7 @@ impl BindLayout {
             .iter()
             .enumerate()
             .map(|(index, binding)| wgpu::BindGroupEntry {
-                binding: index as u32,
+                binding: u32::try_from(index).expect("fewer than u32::MAX bindings"),
                 resource: binding.resource(),
             })
             .collect();
@@ -257,7 +257,7 @@ impl BindLayoutBuilder<'_> {
             _ => Kind::View,
         });
         self.entries.push(wgpu::BindGroupLayoutEntry {
-            binding: self.entries.len() as u32,
+            binding: u32::try_from(self.entries.len()).expect("fewer than u32::MAX bindings"),
             visibility: stage.raw(),
             ty,
             count: None,

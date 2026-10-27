@@ -48,11 +48,16 @@ impl EguiLayer {
         info!("initialising egui for {target:?} {color_space:?}");
         let context = egui::Context::default();
 
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a scale factor is a small number like 2.0"
+        )]
+        let pixels_per_point = window.scale_factor() as f32;
         let state = egui_winit::State::new(
             context.clone(),
             context.viewport_id(),
             window,
-            Some(window.scale_factor() as f32),
+            Some(pixels_per_point),
             window.theme(),
             // Let egui pick a texture-atlas limit from the device limits.
             Some(device.max_texture_size() as usize),

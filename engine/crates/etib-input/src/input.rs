@@ -54,7 +54,7 @@ impl Input {
             WindowEvent::MouseInput { state, button, .. } => self.button(*button, *state),
             WindowEvent::MouseWheel { delta, .. } => self.wheel(*delta),
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = Some(Vec2::new(position.x as f32, position.y as f32));
+                self.cursor = Some(position_to_vec2(position.x, position.y));
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::Focused(false) => {
@@ -67,7 +67,7 @@ impl Input {
 
     pub fn device_event(&mut self, event: &DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-            self.mouse_delta += Vec2::new(*dx as f32, *dy as f32);
+            self.mouse_delta += position_to_vec2(*dx, *dy);
         }
     }
 
@@ -149,9 +149,21 @@ impl Input {
     fn wheel(&mut self, delta: MouseScrollDelta) {
         self.scroll += match delta {
             MouseScrollDelta::LineDelta(_, y) => y,
-            MouseScrollDelta::PixelDelta(position) => position.y as f32 / PIXELS_PER_LINE,
+            MouseScrollDelta::PixelDelta(position) => {
+                position_to_vec2(position.x, position.y).y / PIXELS_PER_LINE
+            }
         };
     }
+}
+
+/// Pixels and mouse counts as winit reports them, in `f64`, at the `f32`
+/// precision everything downstream works in.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "screen coordinates and mouse counts are far inside f32's range"
+)]
+fn position_to_vec2(x: f64, y: f64) -> Vec2 {
+    Vec2::new(x as f32, y as f32)
 }
 
 #[cfg(test)]

@@ -187,7 +187,15 @@ fn decode(data: &[u8], format: &Format) -> Result<Vec<f32>> {
             .as_chunks::<8>()
             .0
             .iter()
-            .map(|s| f64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]) as f32)
+            .map(|s| {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "64-bit samples are mixed at 32"
+                )]
+                let sample =
+                    f64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]) as f32;
+                sample
+            })
             .collect(),
         (tag, bits) => {
             let kind = if tag == FORMAT_FLOAT { "float" } else { "PCM" };
@@ -233,13 +241,13 @@ mod tests {
             (b"data", data),
         ] {
             out.extend_from_slice(id);
-            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            out.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
             out.extend_from_slice(body);
             if body.len() % 2 == 1 {
                 out.push(0);
             }
         }
-        let size = (out.len() - 8) as u32;
+        let size = u32::try_from(out.len() - 8).unwrap();
         out[4..8].copy_from_slice(&size.to_le_bytes());
         out
     }

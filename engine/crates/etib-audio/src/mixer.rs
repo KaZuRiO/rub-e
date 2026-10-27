@@ -223,6 +223,10 @@ impl Playing {
     /// Linear interpolation is what a sound effect wants: it is a gentle
     /// low-pass, inaudible at the small rate changes resampling actually
     /// involves, and it costs two loads and a multiply.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the position is within the sound, and the fraction is meant to lose precision"
+    )]
     fn sample(&self, looping: bool) -> (f32, f32) {
         let frames = self.sound.frames();
         let index = self.position as usize;

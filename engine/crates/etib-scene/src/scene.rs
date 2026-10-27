@@ -96,7 +96,7 @@ impl Scene {
 
         let dynamic_capacity = dynamic_capacity.max(1);
         let dynamic_buffer =
-            StorageBuffer::new(device, "dynamic instances", dynamic_capacity as u32);
+            StorageBuffer::new(device, "dynamic instances", dynamic_slots(dynamic_capacity));
 
         Self {
             pipeline,
@@ -173,7 +173,7 @@ impl Scene {
 
     /// Cubes across all the live dynamic models.
     pub fn dynamic_count(&self) -> u32 {
-        self.dynamic.cube_count() as u32
+        dynamic_slots(self.dynamic.cube_count())
     }
 
     /// The scene-referred image, for the presentation pass to sample.
@@ -206,7 +206,7 @@ impl Scene {
             if !instances.is_empty() {
                 self.dynamic_buffer.write(device, 0, instances);
             }
-            self.dynamic_uploaded = instances.len() as u32;
+            self.dynamic_uploaded = dynamic_slots(instances.len());
         }
 
         if let Some(statics) = &self.statics {
@@ -242,6 +242,16 @@ impl Scene {
             skybox.draw(&mut pass, &self.camera_group);
         }
     }
+}
+
+/// A number of dynamic cubes as the `u32` instance count a draw takes. Every
+/// count it is given is at most the capacity, which went through it first.
+///
+/// # Panics
+///
+/// For a capacity past `u32::MAX` cubes.
+fn dynamic_slots(cubes: usize) -> u32 {
+    u32::try_from(cubes).expect("a dynamic capacity of more than u32::MAX cubes")
 }
 
 #[cfg(test)]

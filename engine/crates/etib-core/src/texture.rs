@@ -655,6 +655,10 @@ impl Texture2d {
 ///
 /// Values past half's range (65504) become infinity, as they would under any
 /// other rounding of a number that large, and NaN stays NaN.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "every cast keeps only bits already masked or shifted into a half's 16"
+)]
 fn to_f16(value: f32) -> u16 {
     let bits = value.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;

@@ -84,7 +84,7 @@ impl<T: Pod> VertexBuffer<T> {
         );
         Self {
             buffer,
-            len: data.len() as u32,
+            len: element_count(label, data.len()),
             _marker: std::marker::PhantomData,
         }
     }
@@ -167,7 +167,7 @@ impl IndexBuffer {
         Self {
             buffer,
             format,
-            len: len as u32,
+            len: element_count(label, len),
         }
     }
 
@@ -236,7 +236,7 @@ impl<T: Pod> StorageBuffer<T> {
         let buffer = create_init(device, label, bytemuck::cast_slice(data), storage_usages());
         Self {
             buffer,
-            len: data.len() as u32,
+            len: element_count(label, data.len()),
             _marker: std::marker::PhantomData,
         }
     }
@@ -400,6 +400,16 @@ mod sealed {
 
     impl<T: Pod> Sealed for super::VertexBuffer<T> {}
     impl<T: Pod> Sealed for super::StorageBuffer<T> {}
+}
+
+/// A slice's length as the `u32` the GPU counts elements in.
+///
+/// # Panics
+///
+/// Past `u32::MAX` elements, which no draw or dispatch could address anyway.
+fn element_count(label: &str, len: usize) -> u32 {
+    u32::try_from(len)
+        .unwrap_or_else(|_| panic!("buffer '{label}' holds more than u32::MAX elements"))
 }
 
 fn create_init(

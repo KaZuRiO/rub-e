@@ -309,7 +309,8 @@ impl Audio {
                 PluginAudioConfiguration {
                     sample_rate: f64::from(self.sample_rate()),
                     min_frames_count: 1,
-                    max_frames_count: self.block_frames() as u32,
+                    max_frames_count: u32::try_from(self.block_frames())
+                        .expect("block sizes are clamped to 16384 frames"),
                 },
             )
             .map_err(|err| {

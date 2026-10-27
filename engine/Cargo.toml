@@ -62,6 +62,7 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
 unwrap_used = "warn"
+cast_possible_truncation = "warn"
 
 # Physics and audio are unbearably slow unoptimised; the dependencies are
 # built once, so optimising them costs nothing in incremental builds.
