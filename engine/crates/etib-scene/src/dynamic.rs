@@ -99,8 +99,6 @@ struct Slot {
 pub(crate) struct DynamicModels {
     slots: Vec<Slot>,
     capacity: usize,
-    /// Cubes across the live models, kept as they are added and removed.
-    cubes: usize,
     dirty: bool,
     /// The last packing of every live cube, cleared and refilled rather than
     /// reallocated, since the scene asks for it every frame something moves.
@@ -112,7 +110,6 @@ impl DynamicModels {
         Self {
             slots: Vec::new(),
             capacity,
-            cubes: 0,
             dirty: false,
             packed: Vec::new(),
         }
@@ -143,7 +140,6 @@ impl DynamicModels {
                 self.slots.len() - 1
             }
         };
-        self.cubes = needed;
         let slot = &mut self.slots[index];
         slot.model = Some(model);
         Ok(DynamicId {
@@ -155,10 +151,9 @@ impl DynamicModels {
     /// Removes a model; a stale or already removed id is ignored.
     pub fn remove(&mut self, id: DynamicId) {
         if let Some(slot) = self.slot_mut(id)
-            && let Some(model) = slot.model.take()
+            && slot.model.take().is_some()
         {
             slot.generation = slot.generation.wrapping_add(1);
-            self.cubes -= model.cube_count();
             self.dirty = true;
         }
     }
@@ -190,11 +185,24 @@ impl DynamicModels {
     }
 
     /// Cubes across all the live models.
+    ///
+    /// Counted afresh rather than kept: a model handed out by
+    /// [`get_mut`](Self::get_mut) can be replaced by one of another size.
     pub fn cube_count(&self) -> usize {
-        self.cubes
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.model.as_ref())
+            .map(DynamicModel::cube_count)
+            .sum()
     }
 
     /// Every live cube, packed, if anything changed since the last call.
+    ///
+    /// # Panics
+    ///
+    /// If the models now hold more cubes than the capacity, which only a model
+    /// replaced or grown through [`get_mut`](Self::get_mut) can do: there is
+    /// nowhere on the GPU to put them.
     pub fn take_changes(&mut self) -> Option<&[CubeRaw]> {
         if !std::mem::take(&mut self.dirty) {
             return None;
@@ -205,6 +213,12 @@ impl DynamicModels {
                 .iter()
                 .filter_map(|slot| slot.model.as_ref())
                 .flat_map(DynamicModel::instances),
+        );
+        assert!(
+            self.packed.len() <= self.capacity,
+            "the dynamic models hold {} cubes, but the scene has room for {}",
+            self.packed.len(),
+            self.capacity
         );
         Some(&self.packed)
     }
@@ -358,6 +372,27 @@ mod tests {
         assert_eq!(models.cube_count(), 2);
         models.remove(three);
         assert_eq!(models.cube_count(), 2, "a stale remove changes nothing");
+    }
+
+    #[test]
+    fn replacing_a_model_through_get_mut_keeps_the_count_right() {
+        let mut models = DynamicModels::new(10);
+        let id = models.add(model_of(0)).unwrap();
+        *models.get_mut(id).unwrap() = model_of(6);
+        assert_eq!(models.cube_count(), 6);
+        assert!(models.add(model_of(5)).is_err(), "6 + 5 is past 10");
+        models.remove(id);
+        assert_eq!(models.cube_count(), 0);
+        assert!(models.add(model_of(10)).is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "the dynamic models hold 12 cubes, but the scene has room for 10")]
+    fn growing_a_model_past_the_capacity_is_refused_by_name() {
+        let mut models = DynamicModels::new(10);
+        let id = models.add(model_of(1)).unwrap();
+        *models.get_mut(id).unwrap() = model_of(12);
+        models.take_changes();
     }
 
     #[test]

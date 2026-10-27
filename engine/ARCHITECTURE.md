@@ -654,7 +654,7 @@ submission per frame — the scene records into the frame's encoder.
 | `Camera` | the application | Plain maths, no GPU. `advance_frame()` once a frame; it remembers last frame's matrix for `prev_view_proj` |
 | `CameraController` | the application | Told which way to `Move`, how far the mouse went, how far the wheel turned; which keys mean what is the application's call |
 | Static cubes | the `Scene`, from construction | Sorted into 32×32 XZ chunks on the CPU once; none at all means no culling buffers are created |
-| Dynamic models | the `Scene`, by id | Slots keep their ids and are reused; a fixed capacity in cubes, set at construction |
+| Dynamic models | the `Scene`, by id | Slots are reused behind generational `DynamicId`s, so a removed model's id reaches nothing; a fixed capacity in cubes, set at construction |
 | Skybox | the `Scene`, optional | A `.hdr` is decoded on the CPU, projected onto a `TextureCube` by a compute pass at load time, then sampled linearly |
 
 A cube is a `CubeRaw` — a model matrix and a colour, 80 bytes — read as

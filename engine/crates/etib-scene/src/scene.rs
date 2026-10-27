@@ -164,7 +164,8 @@ impl Scene {
     }
 
     /// The model, to move or recolour. Changes are uploaded by the next
-    /// [`render`](Self::render).
+    /// [`render`](Self::render), which panics if a model replaced or grown
+    /// through here takes the scene past its dynamic capacity.
     pub fn dynamic_mut(&mut self, id: DynamicId) -> Option<&mut DynamicModel> {
         self.dynamic.get_mut(id)
     }
