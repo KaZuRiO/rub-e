@@ -93,9 +93,10 @@ impl Camera {
         self.projection_matrix() * self.view()
     }
 
-    /// The uniform block for this frame. Call it once per frame: it remembers
-    /// the result as next frame's `prev_view_proj`.
-    pub fn raw(&mut self) -> CameraRaw {
+    /// The uniform block for this frame. Call it once per frame: it moves this
+    /// frame's matrix into `prev_view_proj` for the next one, so a second call
+    /// in the same frame would report no motion at all.
+    pub fn advance_frame(&mut self) -> CameraRaw {
         let view = self.view();
         let proj = self.projection_matrix();
         let view_proj = proj * view;
@@ -287,12 +288,15 @@ mod tests {
         let mut perspective = camera(Projection::Perspective { fovy: 45.0 });
         let view = Mat4::look_at_rh(Vec3::ZERO, Vec3::X, Vec3::Y);
         let expected = Mat4::perspective_rh(45f32.to_radians(), 16.0 / 9.0, 0.1, 100.0) * view;
-        assert_eq!(perspective.raw().view_proj, expected.to_cols_array_2d());
+        assert_eq!(
+            perspective.advance_frame().view_proj,
+            expected.to_cols_array_2d()
+        );
 
         let mut ortho = camera(Projection::Orthographic { scale: 1.0 });
         let right = 16.0 / 9.0;
         let expected = Mat4::orthographic_rh(-right, right, -1.0, 1.0, 0.1, 100.0) * view;
-        assert_eq!(ortho.raw().view_proj, expected.to_cols_array_2d());
+        assert_eq!(ortho.advance_frame().view_proj, expected.to_cols_array_2d());
     }
 
     /// What `OPENGL_TO_WGPU_MATRIX` was for in the engine: wgpu's depth runs
@@ -329,7 +333,7 @@ mod tests {
             0.1,
             100.0,
         );
-        let raw = camera.raw();
+        let raw = camera.advance_frame();
         let product = Mat4::from_cols_array_2d(&raw.inv_view) * camera.view();
         assert!(
             product.abs_diff_eq(Mat4::IDENTITY, 1e-5),
@@ -345,10 +349,10 @@ mod tests {
     #[test]
     fn previous_matrix_trails_by_one_frame() {
         let mut camera = camera(Projection::Perspective { fovy: 45.0 });
-        let first = camera.raw();
+        let first = camera.advance_frame();
         assert_eq!(first.prev_view_proj, first.view_proj);
         camera.set_position(Vec3::new(0.0, 1.0, 0.0));
-        let second = camera.raw();
+        let second = camera.advance_frame();
         assert_eq!(second.prev_view_proj, first.view_proj);
         assert_ne!(second.view_proj, first.view_proj);
     }

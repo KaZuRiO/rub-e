@@ -44,6 +44,11 @@ pub fn parse_model(content: &str) -> Result<Vec<ModelCube>> {
 
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() != 3 && fields.len() != 6 {
+            log::warn!(
+                "line {} of the model has {} fields, not 3 or 6; skipped",
+                index + 1,
+                fields.len()
+            );
             continue;
         }
         let numbers = fields

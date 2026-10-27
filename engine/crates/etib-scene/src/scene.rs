@@ -200,7 +200,7 @@ impl Scene {
     pub fn render(&mut self, device: &Device, encoder: &mut Encoder, camera: &mut Camera) {
         let (width, height) = self.target.size();
         camera.aspect = width as f32 / height as f32;
-        self.camera.write(device, &camera.raw());
+        self.camera.write(device, &camera.advance_frame());
 
         if let Some(instances) = self.dynamic.take_changes() {
             if !instances.is_empty() {
