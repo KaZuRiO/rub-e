@@ -903,6 +903,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "etib-scene"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "env_logger",
+ "etib",
+ "etib-core",
+ "glam",
+ "image",
+ "log",
+]
+
+[[package]]
 name = "etib-ui"
 version = "0.1.0"
 dependencies = [

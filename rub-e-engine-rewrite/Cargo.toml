@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/etib-core", "crates/etib-ui", "crates/etib-audio", "crates/etib"]
+members = [
+    "crates/etib-core",
+    "crates/etib-ui",
+    "crates/etib-audio",
+    "crates/etib-scene",
+    "crates/etib",
+]
 # So `cargo run --example triangle` works from the workspace root.
 default-members = ["crates/etib"]
 
@@ -11,6 +17,7 @@ edition = "2024"
 [workspace.dependencies]
 etib-core = { path = "crates/etib-core" }
 etib-ui = { path = "crates/etib-ui" }
+etib-scene = { path = "crates/etib-scene" }
 # Its own default features are opted into by `etib`'s `clap` feature, so that
 # an application that wants no plugin loader does not link one.
 etib-audio = { path = "crates/etib-audio", default-features = false }
@@ -26,6 +33,8 @@ egui-wgpu = "0.36.2"
 egui-winit = "0.36.2"
 env_logger = "0.11.11"
 glam = "0.32.1"
+# Only the Radiance .hdr decoder, for skyboxes.
+image = { version = "0.25.9", default-features = false, features = ["hdr"] }
 log = "0.4.34"
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"

@@ -18,26 +18,27 @@ Built on [wgpu](https://wgpu.rs) 30 and [winit](https://github.com/rust-windowin
 
 ## 1. Crates
 
-Four crates, with a strict dependency rule: each knows about the layer below it
+Five crates, with a strict dependency rule: each knows about the layer below it
 and nothing about the layer above. Two of them are optional, and one of those —
 `etib-audio` — has nothing below it at all.
 
 ```text
   ┌───────────────────────────────────────────────────────────────────────────┐
-  │ your application  (examples/triangle, examples/chart, examples/cube)      │
+  │ your application  (examples/triangle, chart, cube; etib-scene's hello)    │
   │   implements App, owns its scene passes, its state and its sounds         │
-  └───────────┬────────────────────────┬──────────────────────────┬───────────┘
-              │                        │                          │
-  ┌───────────▼──────────┐  ┌──────────▼──────────┐  ┌────────────▼───────────┐
-  │ etib                 │  │ etib-ui (optional)  │  │ etib-audio (optional)  │
-  │   window, frame loop │  │   egui context and  │  │   Audio, Sound, Voice  │
-  │   App, Blit,         │  │   paint, the HDR    │  │   instruments, the     │
-  │   PostProcess, Lut   │  │   composite pass    │  │   mixer, the device    │
-  │   knows winit        │  │   knows egui, winit │  │   knows cpal, CLAP,    │
-  │                      │  │                     │  │   and hides them       │
-  └───────────┴──────────┘  └──────────┴──────────┘  └────────────────────────┘
-              │                        │                nothing underneath it:
-  ┌───────────▼────────────────────────▼──────────┐     no GPU in its tree
+  └──────┬──────────────────┬──────────────────┬───────────────────┬──────────┘
+         │                  │                  │                   │
+  ┌──────▼───────────┐ ┌────▼─────────────┐ ┌──▼───────────────┐ ┌─▼─────────────────┐
+  │ etib             │ │ etib-scene       │ │ etib-ui (opt.)   │ │ etib-audio (opt.) │
+  │  window, frame   │ │  Camera, Scene,  │ │  egui context    │ │  Audio, Sound,    │
+  │  loop, App,      │ │  cube models,    │ │  and paint, the  │ │  Voice, instru-   │
+  │  Blit, Post-     │ │  GPU culling,    │ │  HDR composite   │ │  ments, the mixer │
+  │  Process, Lut    │ │  skybox          │ │  pass            │ │  knows cpal, CLAP │
+  │  knows winit     │ │  knows no window │ │  knows egui,     │ │  and hides them   │
+  │                  │ │                  │ │  winit           │ │                   │
+  └──────┬───────────┘ └────┬─────────────┘ └──┬───────────────┘ └───────────────────┘
+         │                  │                  │                   nothing underneath:
+  ┌──────▼──────────────────▼──────────────────▼──┐                no GPU in its tree
   │ etib-core                                     │
   │   Instance, Device, Surface, Encoder,         │
   │   passes, pipelines, textures, bindings,      │
@@ -50,6 +51,7 @@ and nothing about the layer above. Two of them are optional, and one of those �
 |---|---|---|
 | `etib-core` | Every GPU object, the swapchain, colour-space detection | winit, egui, the frame loop |
 | `etib` | The window, the frame loop, the `App` trait, the presentation passes | egui and cpal (behind the `ui` and `audio` features), what is being drawn or heard |
+| `etib-scene` | The camera and its controller, cube models, GPU frustum culling, the skybox, the `Scene` that draws them | windows, keyboards and the frame loop — the controller is told which way to `Move`; tone mapping, which is `PostProcess`'s job |
 | `etib-ui` | egui integration and the interface composite | the frame loop — it is usable with a loop of your own |
 | `etib-audio` | The output device, the mixer, sounds in memory, and CLAP instruments | everything else in the workspace, the GPU included |
 
@@ -57,8 +59,9 @@ and nothing about the layer above. Two of them are optional, and one of those �
 returns a wgpu type, the errors are its own, and the async device handshake is
 done for the caller. Every wrapper still exposes a `raw()` / `raw_mut()`
 accessor, because some libraries have to be handed the real objects —
-`etib-ui` is the one place in the workspace that uses them, since `egui-wgpu`
-speaks wgpu directly. It borrows through those accessors rather than holding its
+`etib-ui` is the one library in the workspace that uses them, since `egui-wgpu`
+speaks wgpu directly (tests elsewhere use the device's `raw()` only to wait for
+their GPU work to finish). It borrows through those accessors rather than holding its
 own handles, so there is still exactly one device, one queue and one encoder per
 frame.
 
@@ -184,6 +187,7 @@ framework; the first is yours and the third is optional.
   │ 1. SCENE                                            your code        │
   │    COMPUTE: dispatch_grid over an Rgba16Float StorageTexture, or     │
   │    RASTER:  draws into an Rgba16Float RenderTexture + DepthTexture   │
+  │             — etib_scene::Scene::render is one of these              │
   │    writes SCENE-REFERRED values - 1.0 is not a limit                 │
   └───────────────────────────────┬──────────────────────────────────────┘
                                   │  sampled
@@ -565,7 +569,49 @@ conversation testable.
 
 ---
 
-## 7. Resource model
+## 7. Scenes
+
+`etib-scene` is the cube engine on top of the core: everything it draws goes
+through `etib-core`'s own types, and it knows nothing about windows or input.
+
+```text
+Scene::render(device, encoder, &mut camera)        crates/etib-scene/src/scene.rs
+  │
+  ├─ camera.aspect = the scene's; write CameraRaw    one uniform, Stage::All
+  ├─ upload the dynamic models, if any changed       packed, group transform applied
+  │
+  ├─ reset the indirect draw: instance_count = 0     queued, lands first
+  ├─ COMPUTE "cull"
+  │    chunk pass: one thread per chunk  ──► chunk_visible[]
+  │    cube pass:  one thread per cube, skips culled chunks,
+  │                appends survivors to visible[], counts them atomically
+  │
+  └─ RENDER "scene" into Rgba16Float + depth, cleared
+       static cubes   visible[] as instances, draw_indexed_indirect
+       dynamic cubes  draw_indexed, no culling — there are few of them
+       skybox         one triangle at the far plane, depth LessEqual, no write
+```
+
+Nothing is tone mapped here: `target_view()` is scene-referred, and the
+application hands it to `PostProcess` like any other scene texture. There is one
+submission per frame — the scene records into the frame's encoder.
+
+| Part | Lives in | Notes |
+|---|---|---|
+| `Camera` | the application | Plain maths, no GPU. `raw()` once a frame; it remembers last frame's matrix for `prev_view_proj` |
+| `CameraController` | the application | Told which way to `Move`, how far the mouse went, how far the wheel turned; which keys mean what is the application's call |
+| Static cubes | the `Scene`, from construction | Sorted into 32×32 XZ chunks on the CPU once; none at all means no culling buffers are created |
+| Dynamic models | the `Scene`, by id | Slots keep their ids and are reused; a fixed capacity in cubes, set at construction |
+| Skybox | the `Scene`, optional | A `.hdr` is decoded on the CPU, projected onto a `TextureCube` by a compute pass at load time, then sampled linearly |
+
+A cube is a `CubeRaw` — a model matrix and a colour, 80 bytes — read as
+instance attributes at locations 3 to 7, and as a storage array by the culling
+shader. The same struct is all three: the static array, the visible array the
+culling writes, and the dynamic buffer.
+
+---
+
+## 8. Resource model
 
 ### Bindings are positional
 
@@ -667,7 +713,7 @@ use the long form: `set_pipeline`, `set_bind_group(index, …)`, then
 
 ---
 
-## 8. Conventions
+## 9. Conventions
 
 **Errors.** `etib-core` has one error type carrying a static context string and
 the backend's error as its `source`, so `{:#}` under anyhow prints the chain.
@@ -692,7 +738,7 @@ so a validation message, a log line and a capture all name the same thing.
 
 ---
 
-## 9. Writing an application
+## 10. Writing an application
 
 ```rust
 impl App for MyApp {
@@ -729,18 +775,24 @@ The two examples are the reference:
   the draw is indirect, which is the shape a culling pass slots in front of.
   Its window title shows the frame rate, and it needs neither `ui` nor
   `audio`.
+- **`etib-scene/examples/hello`** — the port of the engine's `hello`: a
+  generated terrain of 10 000 cubes (or `--static <file.model>`), a cat
+  orbiting it as a dynamic model, and an HDR skybox, culled on the GPU and
+  tone mapped by `PostProcess`. `C` captures the mouse to look around through
+  `App::device_event`; the title shows the frame rate and the cube counts.
+  `cargo run -p etib-scene --example hello`.
 - **`examples/chart`** — four zones of known scene-referred values, so the
   differences between the curves are something you can look at rather than
   reason about. The post-processing pass is the only thing standing between
   those values and the window.
 
-All three take `--sdr` / `--hdr` to force the surface either way; the triangle
+All of them take `--sdr` / `--hdr` to force the surface either way; the triangle
 and the chart also take `--lut teal|<file.cube>` to grade through a table. `examples/common/lut.rs` is
 shared between them by `#[path]`.
 
 ---
 
-## 10. File map
+## 11. File map
 
 | Path | What lives there |
 |---|---|
@@ -762,6 +814,14 @@ shared between them by `#[path]`.
 | `crates/etib/src/lut.rs` | `Lut`: identity, `from_rgb`, `.cube` parser |
 | `crates/etib/src/blit.rs` | The 1:1 presentation pass |
 | `crates/etib/src/shaders/` | `post.wgsl`, `blit.wgsl` |
+| `crates/etib-scene/src/scene.rs` | `Scene`: what it owns, and the order a frame is recorded in |
+| `crates/etib-scene/src/camera.rs` | `Camera`, `CameraRaw`, `CameraController`, `Move` |
+| `crates/etib-scene/src/cube.rs` | The cube mesh, `Vertex`, `CubeRaw` and their vertex layouts |
+| `crates/etib-scene/src/model.rs` | `.model` files: `ModelCube`, `parse_model`, `load_model`, `save_model` |
+| `crates/etib-scene/src/dynamic.rs` | `DynamicModel`, and the slots the scene keeps them in |
+| `crates/etib-scene/src/culling.rs` | Chunking on the CPU, the two culling passes, the static cubes' buffers |
+| `crates/etib-scene/src/skybox.rs` | `.hdr` decoding, the equirectangular projection, the skybox pass |
+| `crates/etib-scene/src/shaders/` | `cube.wgsl`, `cull.wgsl`, `chunk_cull.wgsl`, `skybox.wgsl`, `equirectangular.wgsl` |
 | `crates/etib-ui/src/layer.rs` | `EguiLayer`: input bridge and paint pass |
 | `crates/etib-ui/src/composite.rs` | The standard-range interface texture and its composite |
 | `crates/etib-audio/src/engine.rs` | `Audio`, `Play`, `Voice`; opening the device and the callback |
@@ -776,7 +836,7 @@ shared between them by `#[path]`.
 
 ---
 
-## 11. Invariants worth knowing
+## 12. Invariants worth knowing
 
 - **Bind order is positional.** Declaration order in `BindLayout` *is* the
   `@binding` index, and the group's slice must match it.
@@ -796,6 +856,13 @@ shared between them by `#[path]`.
 - **What a draw consumes from a compute pass stays on the GPU.** Instances in
   a `StorageBuffer` and counts in an `IndirectBuffer` are written and read in
   the same submission; nothing reads them back to decide what to draw.
+- **One camera uniform, every stage.** It is laid out with `Stage::All`, so the
+  culling passes, the cubes and the skybox share one bind group as `@group(0)`.
+- **The culling counter is zeroed before the culling runs**, by a queued write
+  that lands ahead of the frame's single submission. Recording a second frame
+  into the same submission would need the reset in the encoder instead.
+- **The scene clears its own target and depth**, so it is the first pass that
+  touches them each frame.
 - **The scene texture must be a float format** if anything is written above 1.0;
   `Rgba8Unorm` would clip before the tone curve ever sees it.
 - **A LUT is indexed in gamma-encoded space**, and its entries are gamma-encoded

@@ -274,6 +274,13 @@ impl RenderPass<'_> {
             .set_index_buffer(buffer.raw().slice(..), buffer.format().raw());
     }
 
+    /// Draws `vertices` with the current pipeline and bind groups, without an
+    /// index buffer: the long form of [`draw`](Self::draw), for a vertexless
+    /// pipeline with more than one bind group.
+    pub fn draw_vertices(&mut self, vertices: Range<u32>) {
+        self.inner.draw(vertices, 0..1);
+    }
+
     /// Draws `indices` of the current index buffer, `instances` times, with
     /// `base_vertex` added to each index.
     pub fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
