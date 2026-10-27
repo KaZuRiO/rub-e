@@ -1,0 +1,10 @@
+[package]
+name = "etib-input"
+version.workspace = true
+edition.workspace = true
+description = "Keyboard, mouse and gamepad state for etib applications, fed from winit events"
+
+[dependencies]
+glam = { workspace = true }
+log = { workspace = true }
+winit = { workspace = true }

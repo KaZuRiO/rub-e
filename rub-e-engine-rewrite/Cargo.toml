@@ -5,6 +5,7 @@ members = [
     "crates/etib-ui",
     "crates/etib-audio",
     "crates/etib-scene",
+    "crates/etib-input",
     "crates/etib",
 ]
 # So `cargo run --example triangle` works from the workspace root.
@@ -18,6 +19,7 @@ edition = "2024"
 etib-core = { path = "crates/etib-core" }
 etib-ui = { path = "crates/etib-ui" }
 etib-scene = { path = "crates/etib-scene" }
+etib-input = { path = "crates/etib-input" }
 # Its own default features are opted into by `etib`'s `clap` feature, so that
 # an application that wants no plugin loader does not link one.
 etib-audio = { path = "crates/etib-audio", default-features = false }

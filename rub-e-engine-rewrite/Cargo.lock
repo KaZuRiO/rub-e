@@ -903,6 +903,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "etib-input"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "log",
+ "winit",
+]
+
+[[package]]
 name = "etib-scene"
 version = "0.1.0"
 dependencies = [
