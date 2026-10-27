@@ -14,8 +14,11 @@ use crate::texture::{Sampler, StorageFormat, TextureView};
 /// Which shader stage a binding is visible to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
+    /// Compute shaders only.
     Compute,
+    /// Vertex shaders only.
     Vertex,
+    /// Fragment shaders only.
     Fragment,
     /// Every stage: for a resource such as a camera that a compute pass, a
     /// vertex shader and a fragment shader all read, so that one layout and
@@ -42,7 +45,9 @@ impl Stage {
 /// agree with the WGSL: `var<storage, read>` or `var<storage, read_write>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
+    /// `var<storage, read>`: the shader only reads it.
     Read,
+    /// `var<storage, read_write>`: the shader may write it too.
     ReadWrite,
 }
 
@@ -213,6 +218,7 @@ impl BindLayoutBuilder<'_> {
         self
     }
 
+    /// Creates the layout from the bindings declared so far, in order.
     pub fn finish(self) -> BindLayout {
         debug!(
             "creating bind group layout '{}' with {} binding(s)",

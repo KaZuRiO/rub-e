@@ -12,7 +12,9 @@ use winit::window::Window;
 /// Handed to [`App`](crate::App) on every callback; the fields are public
 /// because that is all this type is for.
 pub struct Gpu {
+    /// The device every resource is made from.
     pub device: Device,
+    /// The window's swapchain.
     pub surface: Surface,
     /// Kept alive here because the surface presents to it.
     pub window: Arc<Window>,

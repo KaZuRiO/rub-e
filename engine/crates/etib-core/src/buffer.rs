@@ -112,7 +112,9 @@ impl<T: Pod> VertexBuffer<T> {
 /// Which integer type an [`IndexBuffer`] holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndexFormat {
+    /// Sixteen-bit indices.
     U16,
+    /// Thirty-two-bit indices.
     U32,
 }
 
@@ -171,6 +173,7 @@ impl IndexBuffer {
         }
     }
 
+    /// Which integer type the indices are.
     pub fn format(&self) -> IndexFormat {
         self.format
     }
@@ -291,10 +294,15 @@ fn storage_usages() -> wgpu::BufferUsages {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct DrawIndexedArgs {
+    /// How many indices each instance draws.
     pub index_count: u32,
+    /// How many instances are drawn; what a culling pass counts up.
     pub instance_count: u32,
+    /// The first index read from the index buffer.
     pub first_index: u32,
+    /// Added to every index before the vertex is fetched.
     pub base_vertex: i32,
+    /// The first instance's index; must stay zero, see above.
     pub first_instance: u32,
 }
 

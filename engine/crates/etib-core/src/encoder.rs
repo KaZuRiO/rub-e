@@ -14,13 +14,18 @@ use crate::texture::{DepthTexture, TextureView};
 /// A colour in linear space, 0..1 per channel.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Color {
+    /// Red.
     pub r: f64,
+    /// Green.
     pub g: f64,
+    /// Blue.
     pub b: f64,
+    /// Alpha: 1.0 is opaque.
     pub a: f64,
 }
 
 impl Color {
+    /// Opaque black, what a scene is usually cleared to.
     pub const BLACK: Self = Self {
         r: 0.0,
         g: 0.0,
@@ -266,6 +271,7 @@ impl RenderPass<'_> {
             .set_vertex_buffer(slot, buffer.vertex_buffer().slice(..));
     }
 
+    /// Reads the indices of the draws that follow from `buffer`.
     pub fn set_index_buffer(&mut self, buffer: &IndexBuffer) {
         self.inner
             .set_index_buffer(buffer.raw().slice(..), buffer.format().raw());

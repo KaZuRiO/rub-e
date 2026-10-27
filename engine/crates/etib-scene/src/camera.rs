@@ -10,10 +10,12 @@ use glam::{Mat4, Vec3};
 /// How the camera projects the world.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Projection {
+    /// Things shrink with distance, as an eye sees them.
     Perspective {
         /// Vertical field of view, in degrees.
         fovy: f32,
     },
+    /// No perspective: parallel lines stay parallel, for an isometric view.
     Orthographic {
         /// Half the visible height, in world units.
         scale: f32,
@@ -26,16 +28,23 @@ pub enum Projection {
 /// the far plane at 1.
 #[derive(Debug, Clone)]
 pub struct Camera {
+    /// Where the camera is, in world units.
     pub eye: Vec3,
+    /// The point it looks at.
     pub target: Vec3,
+    /// Which way is up for the image; need not be normalised.
     pub up: Vec3,
     /// Width over height. [`Scene::render`](crate::Scene::render) keeps it in
     /// step with the scene's size.
     pub aspect: f32,
+    /// How the view is projected.
     pub projection: Projection,
+    /// Distance to the near clipping plane; nothing closer is drawn.
     pub znear: f32,
+    /// Distance to the far clipping plane; nothing further is drawn.
     pub zfar: f32,
-    /// What [`raw`](Self::raw) returned last, for temporal reprojection.
+    /// What [`advance_frame`](Self::advance_frame) returned last, for temporal
+    /// reprojection.
     prev_view_proj: Option<Mat4>,
 }
 
@@ -43,14 +52,19 @@ pub struct Camera {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraRaw {
+    /// World to clip space: the projection times the view.
     pub view_proj: [[f32; 4]; 4],
+    /// View to world space, for rebuilding a world ray from a fragment.
     pub inv_view: [[f32; 4]; 4],
+    /// Clip to view space.
     pub inv_proj: [[f32; 4]; 4],
     /// Last frame's `view_proj`; this frame's on the first.
     pub prev_view_proj: [[f32; 4]; 4],
 }
 
 impl Camera {
+    /// A camera at `eye` looking at `target`. `aspect` is width over height,
+    /// and `znear` and `zfar` bound what is drawn.
     pub fn new(
         eye: Vec3,
         target: Vec3,
@@ -72,10 +86,12 @@ impl Camera {
         }
     }
 
+    /// World to view space: a right-handed look-at.
     pub fn view(&self) -> Mat4 {
         Mat4::look_at_rh(self.eye, self.target, self.up)
     }
 
+    /// View to clip space, with depth mapped to 0..1.
     pub fn projection_matrix(&self) -> Mat4 {
         match self.projection {
             Projection::Perspective { fovy } => {
@@ -109,10 +125,12 @@ impl Camera {
         }
     }
 
+    /// Moves the eye, leaving what it looks at where it is.
     pub fn set_position(&mut self, eye: Vec3) {
         self.eye = eye;
     }
 
+    /// Aims the camera at `target` from where it stands.
     pub fn look_at(&mut self, target: Vec3) {
         self.target = target;
     }
@@ -144,11 +162,17 @@ pub enum CameraMode {
 /// A direction a [`CameraController`] can be told to move in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Move {
+    /// Along the direction the camera faces, kept level.
     Forward,
+    /// Away from the direction the camera faces.
     Back,
+    /// To the camera's left.
     Left,
+    /// To the camera's right.
     Right,
+    /// Straight up, whatever the camera faces.
     Up,
+    /// Straight down.
     Down,
 }
 
@@ -168,6 +192,7 @@ pub struct CameraController {
     pub yaw: f32,
     /// Rotation above the horizon, in radians.
     pub pitch: f32,
+    /// How input moves the camera.
     pub mode: CameraMode,
     held: [bool; 6],
     /// Scale applied to an orthographic camera on the next update.
@@ -175,6 +200,8 @@ pub struct CameraController {
 }
 
 impl CameraController {
+    /// A first-person controller moving `speed` units a second and turning
+    /// `sensitivity` radians per unit of mouse motion, facing -Z.
     pub fn new(speed: f32, sensitivity: f32) -> Self {
         Self {
             speed,

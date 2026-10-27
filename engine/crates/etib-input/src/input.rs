@@ -44,10 +44,13 @@ pub struct Input {
 }
 
 impl Input {
+    /// Nothing held, and no gamepad events yet.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Takes in a window event: keys, mouse buttons, the wheel, the cursor and
+    /// focus. Everything else is ignored.
     pub fn window_event(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::KeyboardInput { event, .. } => self.key(event.physical_key, event.state),
@@ -65,6 +68,7 @@ impl Input {
         }
     }
 
+    /// Takes in a raw device event; only relative mouse motion is used.
     pub fn device_event(&mut self, event: &DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
             self.mouse_delta += position_to_vec2(*dx, *dy);
@@ -86,14 +90,17 @@ impl Input {
         self.keys.just_released(key)
     }
 
+    /// Whether `button` is down.
     pub fn is_mouse_pressed(&self, button: MouseButton) -> bool {
         self.buttons.is_down(button)
     }
 
+    /// Whether `button` went down since the last `clear_frame_state`.
     pub fn is_mouse_just_pressed(&self, button: MouseButton) -> bool {
         self.buttons.just_pressed(button)
     }
 
+    /// Whether `button` came up since the last `clear_frame_state`.
     pub fn is_mouse_just_released(&self, button: MouseButton) -> bool {
         self.buttons.just_released(button)
     }

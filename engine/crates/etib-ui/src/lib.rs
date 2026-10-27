@@ -31,7 +31,7 @@
 //! surface. On one of those, [`EguiLayer`] paints into a standard-range texture
 //! of its own and composites it at the display's SDR white, which is where an
 //! interface belongs anyway. It costs one texture and one pass, and only on
-//! such a surface; see [`composite`](mod@composite) for the details.
+//! such a surface; see `src/composite.rs` for the details.
 //!
 //! # Interop
 //!

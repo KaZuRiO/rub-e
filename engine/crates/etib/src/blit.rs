@@ -12,6 +12,8 @@ use etib_core::{
 };
 use log::debug;
 
+/// A 1:1 copy of a display-referred texture onto the swapchain image, with no
+/// tone curve: see the module documentation for where it belongs.
 pub struct Blit {
     pipeline: RenderPipeline,
     layout: BindLayout,
@@ -20,6 +22,8 @@ pub struct Blit {
 }
 
 impl Blit {
+    /// A pass drawing `source` into targets of `target`'s format. Call
+    /// [`rebind`](Self::rebind) when the source is recreated.
     pub fn new(device: &Device, target: TextureFormat, source: &TextureView) -> Self {
         let shader = Shader::wgsl(device, "blit", include_str!("shaders/blit.wgsl"));
 

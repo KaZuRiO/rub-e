@@ -5,6 +5,7 @@ use std::fmt;
 use std::num::ParseFloatError;
 use std::path::PathBuf;
 
+/// `Result` with this crate's [`Error`] as the default error type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Something a scene could not load, or could not make room for.
@@ -16,22 +17,31 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     /// A file could not be read or written.
     Io {
+        /// The file that was being read or written.
         path: PathBuf,
+        /// Why it could not be.
         source: std::io::Error,
     },
     /// A line of a `.model` file holds something that is not a number.
     Parse {
         /// One-based, as an editor counts.
         line: usize,
+        /// What was wrong with the number.
         source: ParseFloatError,
     },
     /// A skybox image could not be decoded.
     Image {
+        /// The decoder's own error.
         source: Box<dyn StdError + Send + Sync>,
     },
     /// A dynamic model that would take the scene past the number of dynamic
     /// cubes it was built with room for.
-    Capacity { needed: usize, capacity: usize },
+    Capacity {
+        /// The cubes the models would hold with this one added.
+        needed: usize,
+        /// The cubes the scene was built with room for.
+        capacity: usize,
+    },
 }
 
 impl fmt::Display for Error {

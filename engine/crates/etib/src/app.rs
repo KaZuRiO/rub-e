@@ -16,6 +16,7 @@ use crate::gpu::Gpu;
 /// How the window is created. Everything else about the application lives in
 /// the [`App`] implementation.
 pub struct Config {
+    /// The window's title.
     pub title: String,
     /// Initial inner size, in logical pixels.
     pub size: (u32, u32),
@@ -51,11 +52,13 @@ impl Default for Config {
 
 /// Everything the runner hands to [`App::render`] for one frame.
 pub struct Frame<'a> {
+    /// The window, the device and the swapchain.
     pub gpu: &'a Gpu,
     /// The frame's encoder. The runner submits it once `render` returns.
     pub encoder: &'a mut Encoder,
     /// View of the swapchain image this frame draws into.
     pub view: &'a TextureView,
+    /// Measurements of this frame, for an overlay.
     pub stats: FrameStats<'a>,
 }
 
@@ -64,7 +67,9 @@ pub struct Frame<'a> {
 pub struct FrameStats<'a> {
     /// Smoothed frame rate; a raw `1 / dt` reads as noise.
     pub fps: f32,
+    /// How many frames have been rendered, this one included.
     pub frame_index: u64,
+    /// The swapchain size in pixels.
     pub surface_size: (u32, u32),
     /// The graphics backend in use, formatted for display.
     pub backend: &'a str,

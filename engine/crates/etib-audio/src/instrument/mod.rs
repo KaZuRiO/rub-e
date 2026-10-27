@@ -175,8 +175,11 @@ impl Default for InstrumentConfig {
 pub struct PluginInfo {
     /// The id to pass as [`InstrumentConfig::plugin_id`].
     pub id: String,
+    /// The plugin's name, as it presents itself to a host.
     pub name: String,
+    /// Who made it.
     pub vendor: String,
+    /// Its version, in whatever form the vendor writes it.
     pub version: String,
     /// Whether the plugin declares itself an instrument. Anything else is an
     /// effect, which this can load but will hear nothing from, since it feeds
@@ -189,9 +192,13 @@ pub struct PluginInfo {
 pub struct ParamInfo {
     /// The id to pass to [`Instrument::set_param`].
     pub id: u32,
+    /// The name the plugin shows for it.
     pub name: String,
+    /// The lowest value it takes.
     pub min: f64,
+    /// The highest value it takes.
     pub max: f64,
+    /// The value a freshly loaded plugin starts at.
     pub default: f64,
 }
 

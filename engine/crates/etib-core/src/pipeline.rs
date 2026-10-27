@@ -94,6 +94,9 @@ pub struct RenderPipeline(wgpu::RenderPipeline);
 
 impl RenderPipeline {
     #[allow(clippy::too_many_arguments)]
+    /// A vertexless pipeline that fills `target` with one triangle, drawn as
+    /// `0..3`: what a full-screen pass such as a blit or a tone map wants. The
+    /// layout is `@group(0)`.
     pub fn screen(
         device: &Device,
         label: &str,
@@ -230,7 +233,9 @@ impl RenderPipeline {
 
 /// Everything [`RenderPipeline::raster`] needs to know.
 pub struct RasterDesc<'a> {
+    /// Names the pipeline in logs and in validation messages.
     pub label: &'a str,
+    /// The module both entry points are in.
     pub shader: &'a Shader,
     /// The vertex and fragment entry points.
     pub entry_points: (&'a str, &'a str),
@@ -238,12 +243,15 @@ pub struct RasterDesc<'a> {
     pub layouts: &'a [&'a BindLayout],
     /// The vertex buffers; the nth is bound to slot n.
     pub vertex: &'a [VertexLayout<'a>],
+    /// The format of the colour target it draws into.
     pub target: TextureFormat,
     /// Depth testing against a [`DepthTexture`], or none. A pipeline with
     /// depth must be drawn in a pass opened with
     /// [`Encoder::render_pass_with_depth`](crate::Encoder::render_pass_with_depth).
     pub depth: Option<Depth>,
+    /// How its output combines with the target.
     pub blend: Blend,
+    /// Which faces are discarded.
     pub cull: Cull,
 }
 
@@ -253,6 +261,7 @@ pub struct Depth {
     /// Whether passing fragments record their depth. Off for transparent
     /// surfaces and for a skybox drawn behind everything.
     pub write: bool,
+    /// Which fragments pass, against the depth already there.
     pub compare: Compare,
 }
 
@@ -269,8 +278,11 @@ impl Default for Depth {
 /// When a fragment passes the depth test, against what is already there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Compare {
+    /// Nearer than what is there: the usual test for opaque geometry.
     Less,
+    /// Nearer or at the same depth: for a skybox drawn at the far plane.
     LessEqual,
+    /// Every fragment passes.
     Always,
 }
 
@@ -288,8 +300,11 @@ impl Compare {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Cull {
     #[default]
+    /// Draw both faces.
     None,
+    /// Discard faces turned away: the usual choice for closed meshes.
     Back,
+    /// Discard faces turned towards the viewer.
     Front,
 }
 
@@ -308,7 +323,9 @@ impl Cull {
 pub struct VertexLayout<'a> {
     /// The size of one element, in bytes: usually `size_of::<T>()`.
     pub stride: u64,
+    /// Whether the slot advances per vertex or per instance.
     pub step: StepMode,
+    /// Where each shader input sits in one element.
     pub attributes: &'a [VertexAttribute],
 }
 
@@ -316,7 +333,9 @@ pub struct VertexLayout<'a> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StepMode {
     #[default]
+    /// One element per vertex.
     Vertex,
+    /// One element per instance, held across the instance's vertices.
     Instance,
 }
 
@@ -332,9 +351,11 @@ impl StepMode {
 /// One shader input, `@location(n)`, read from an element of a vertex buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VertexAttribute {
+    /// The shader input it feeds: `@location(n)`.
     pub location: u32,
     /// Where it starts within the element, in bytes.
     pub offset: u64,
+    /// How the bytes at `offset` are read.
     pub format: VertexFormat,
 }
 

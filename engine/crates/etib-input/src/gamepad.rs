@@ -33,6 +33,8 @@ impl Default for Gamepads {
 }
 
 impl Gamepads {
+    /// Starts listening for gamepads. A platform where gilrs cannot start
+    /// gives an empty set rather than an error.
     pub fn new() -> Self {
         let gilrs = match Gilrs::new() {
             Ok(gilrs) => gilrs,
@@ -126,6 +128,7 @@ pub struct Gamepad<'a> {
 }
 
 impl Gamepad<'_> {
+    /// The name the operating system gives the device.
     pub fn name(&self) -> &str {
         self.pad.name()
     }

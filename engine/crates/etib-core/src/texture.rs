@@ -147,6 +147,7 @@ pub struct StorageTexture {
 }
 
 impl StorageTexture {
+    /// A `width` x `height` texture of `format`, zeroed.
     pub fn new(
         device: &Device,
         label: &str,
@@ -166,10 +167,12 @@ impl StorageTexture {
         &self.target.view
     }
 
+    /// The format, which the layout's storage binding has to declare.
     pub fn format(&self) -> StorageFormat {
         self.format
     }
 
+    /// The size in texels.
     pub fn size(&self) -> (u32, u32) {
         self.target.size
     }
@@ -213,6 +216,7 @@ impl Filter {
 pub struct Sampler(wgpu::Sampler);
 
 impl Sampler {
+    /// A sampler that filters with `filter` and clamps to the edge.
     pub fn new(device: &Device, label: &str, filter: Filter) -> Self {
         Self(device.raw().create_sampler(&wgpu::SamplerDescriptor {
             label: Some(label),
@@ -268,6 +272,7 @@ pub struct RenderTexture {
 }
 
 impl RenderTexture {
+    /// A `width` x `height` texture of `format`.
     pub fn new(
         device: &Device,
         label: &str,
@@ -287,10 +292,12 @@ impl RenderTexture {
         &self.target.view
     }
 
+    /// The format, which a pipeline drawing into it has to target.
     pub fn format(&self) -> TextureFormat {
         self.format
     }
 
+    /// The size in texels.
     pub fn size(&self) -> (u32, u32) {
         self.target.size
     }
@@ -437,6 +444,7 @@ pub struct DepthTexture {
 impl DepthTexture {
     pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+    /// A `width` x `height` depth buffer.
     pub fn new(device: &Device, label: &str, width: u32, height: u32) -> Self {
         let (texture, view) = create_depth(device, label, width, height);
         Self {
@@ -449,6 +457,7 @@ impl DepthTexture {
         &self.target.view
     }
 
+    /// The size in texels, which has to match its colour target's.
     pub fn size(&self) -> (u32, u32) {
         self.target.size
     }
@@ -554,6 +563,7 @@ impl TextureCube {
         &self.storage_view
     }
 
+    /// The format of the faces, as the storage view's binding declares it.
     pub fn format(&self) -> StorageFormat {
         self.format
     }
@@ -646,6 +656,7 @@ impl Texture2d {
         &self.view
     }
 
+    /// The size in texels.
     pub fn size(&self) -> (u32, u32) {
         self.size
     }

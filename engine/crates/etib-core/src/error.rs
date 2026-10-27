@@ -3,6 +3,7 @@
 use std::error::Error as StdError;
 use std::fmt;
 
+/// `Result` with this crate's [`Error`] as the default error type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Something the graphics backend refused to do.

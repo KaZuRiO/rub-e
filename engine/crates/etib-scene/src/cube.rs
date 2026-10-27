@@ -7,9 +7,11 @@ use glam::{Mat4, Vec4};
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
+    /// Where the corner is, on a unit cube centred on the origin.
     pub position: [f32; 3],
     /// Linear RGB. The cube shader colours by instance and ignores it.
     pub color: [f32; 3],
+    /// The face's outward normal, for lighting.
     pub normal: [f32; 3],
 }
 
@@ -96,11 +98,14 @@ pub const INDICES: &[u16] = &[
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CubeRaw {
+    /// Model to world space, column-major as WGSL reads it.
     pub model: [[f32; 4]; 4],
+    /// Linear RGBA; alpha is unused.
     pub color: [f32; 4],
 }
 
 impl CubeRaw {
+    /// An instance placed by `model`, coloured `color`.
     pub fn new(model: Mat4, color: Vec4) -> Self {
         Self {
             model: model.to_cols_array_2d(),

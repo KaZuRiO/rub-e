@@ -68,6 +68,7 @@ impl SoundGroup {
         self.voice.update(listener);
     }
 
+    /// The voice playing this group's loop, to change its controls directly.
     pub fn voice(&self) -> &SpatialVoice {
         &self.voice
     }

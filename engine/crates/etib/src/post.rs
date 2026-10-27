@@ -64,6 +64,7 @@ impl Tonemap {
 pub struct Grade {
     /// Exposure in stops. Each `+1.0` doubles the light reaching the curve.
     pub exposure_ev: f32,
+    /// The curve that brings scene-referred light into display range.
     pub tonemap: Tonemap,
     /// `1.0` leaves contrast alone; higher pivots around mid-grey.
     pub contrast: f32,
@@ -143,6 +144,8 @@ pub struct PostProcess {
 }
 
 impl PostProcess {
+    /// A pass tone mapping `source` into targets of `target`'s format, with no
+    /// lookup table. Call [`rebind`](Self::rebind) when the source is recreated.
     pub fn new(device: &Device, target: TextureFormat, source: &TextureView) -> Self {
         let shader = Shader::wgsl(device, "post", include_str!("shaders/post.wgsl"));
 

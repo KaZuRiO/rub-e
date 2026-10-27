@@ -16,8 +16,11 @@ use crate::model::{ModelCube, load_model};
 #[derive(Debug, Clone)]
 pub struct DynamicModel {
     cubes: Vec<ModelCube>,
+    /// Where the model's origin is in the world.
     pub position: Vec3,
+    /// How the model is turned about its origin.
     pub rotation: Quat,
+    /// Uniform scale: 1.0 is the size the cubes were authored at.
     pub scale: f32,
 }
 
@@ -27,6 +30,7 @@ impl DynamicModel {
         Ok(Self::from_cubes(load_model(path)?))
     }
 
+    /// A model of `cubes`, placed at the origin with no rotation.
     pub fn from_cubes(cubes: Vec<ModelCube>) -> Self {
         Self {
             cubes,
@@ -36,6 +40,7 @@ impl DynamicModel {
         }
     }
 
+    /// The cubes, in model space.
     pub fn cubes(&self) -> &[ModelCube] {
         &self.cubes
     }

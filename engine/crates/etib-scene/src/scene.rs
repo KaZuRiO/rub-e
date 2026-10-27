@@ -137,6 +137,7 @@ impl Scene {
         Ok(())
     }
 
+    /// Removes the skybox; the background is cleared to black again.
     pub fn clear_skybox(&mut self) {
         self.skybox = None;
     }
@@ -157,6 +158,7 @@ impl Scene {
         self.dynamic.remove(id);
     }
 
+    /// The model `id` names, or `None` once it has been removed.
     pub fn dynamic(&self, id: DynamicId) -> Option<&DynamicModel> {
         self.dynamic.get(id)
     }
@@ -167,6 +169,7 @@ impl Scene {
         self.dynamic.get_mut(id)
     }
 
+    /// How many static cubes the scene holds, before culling.
     pub fn static_count(&self) -> u32 {
         self.statics.as_ref().map_or(0, |statics| statics.count)
     }
@@ -181,6 +184,7 @@ impl Scene {
         self.target.view()
     }
 
+    /// The size of the target, in pixels.
     pub fn size(&self) -> (u32, u32) {
         self.target.size()
     }

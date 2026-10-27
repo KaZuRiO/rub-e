@@ -58,6 +58,7 @@ winit = "0.30.13"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
