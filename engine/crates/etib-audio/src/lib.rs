@@ -170,6 +170,8 @@ pub use instrument::{Gui, Instrument, InstrumentConfig, ParamInfo, PluginInfo, p
 
 /// How many sounds may be playing at once. Past this, starting another takes
 /// the oldest one; [`Audio::stolen`] counts how often that has happened.
+#[cfg(feature = "clap")]
+pub use mixer::MAX_INSTRUMENTS;
 pub use mixer::MAX_VOICES;
 
 // Re-exported so an application can name the backend's types — to enumerate

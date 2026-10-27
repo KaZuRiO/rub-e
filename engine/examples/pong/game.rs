@@ -4,7 +4,7 @@
 use std::f32::consts::PI;
 
 use anyhow::{Context as _, Result};
-use etib::ui::EguiLayer;
+use etib::ui::{EguiLayer, PaintTarget};
 use etib::winit::event::{DeviceEvent, WindowEvent};
 use etib::winit::window::Window;
 use etib::{App, Frame, Gpu, Grade, Output, PostProcess};
@@ -624,10 +624,12 @@ impl App for PongApp {
             self.egui.render(
                 &gpu.device,
                 encoder,
-                &gpu.window,
-                view,
-                gpu.size(),
-                self.output,
+                PaintTarget {
+                    window: &gpu.window,
+                    view,
+                    size_in_pixels: gpu.size(),
+                    output: self.output,
+                },
                 |ui| {
                     action = if !started {
                         main_menu(ui.ctx())

@@ -33,6 +33,13 @@ use crate::sound::Sound;
 /// the sound that started last is the one the listener is waiting for.
 pub const MAX_VOICES: usize = 32;
 
+/// How many instruments may be loaded at once.
+///
+/// The mixer's list of them is allocated at this size up front, so that taking
+/// one in never grows it on the audio thread; a load past it is refused.
+#[cfg(feature = "clap")]
+pub const MAX_INSTRUMENTS: usize = 4;
+
 /// How many `play` calls may be waiting to be picked up. One callback's worth
 /// of starts is a handful; this is generous.
 pub(crate) const COMMAND_QUEUE: usize = 64;
@@ -60,6 +67,10 @@ pub(crate) struct Shared {
     /// How many voices have been cut short to make room for a new one. There is
     /// no way to report it from the audio thread, so it is counted here.
     pub stolen: AtomicU64,
+    /// How many instruments are loaded, or being loaded. Counted on the
+    /// owning thread, which is where loads are refused.
+    #[cfg(feature = "clap")]
+    pub instruments: AtomicUsize,
 }
 
 impl Shared {
@@ -69,7 +80,30 @@ impl Shared {
             playing: AtomicUsize::new(0),
             stop_generation: AtomicU64::new(0),
             stolen: AtomicU64::new(0),
+            #[cfg(feature = "clap")]
+            instruments: AtomicUsize::new(0),
         }
+    }
+
+    /// Takes one of the [`MAX_INSTRUMENTS`] places, or says why there is none.
+    #[cfg(feature = "clap")]
+    pub fn reserve_instrument(&self) -> crate::error::Result<()> {
+        self.instruments
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |loaded| {
+                (loaded < MAX_INSTRUMENTS).then_some(loaded + 1)
+            })
+            .map(drop)
+            .map_err(|_| {
+                crate::error::Error::new(format!(
+                    "at most {MAX_INSTRUMENTS} instruments can be loaded at once"
+                ))
+            })
+    }
+
+    /// Gives back a place taken by [`reserve_instrument`](Self::reserve_instrument).
+    #[cfg(feature = "clap")]
+    pub fn release_instrument(&self) {
+        self.instruments.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -251,7 +285,7 @@ impl Mixer {
             shared,
             voices: Vec::with_capacity(MAX_VOICES),
             #[cfg(feature = "clap")]
-            instruments: Vec::with_capacity(4),
+            instruments: Vec::with_capacity(MAX_INSTRUMENTS),
             mix: vec![0.0; block_frames * 2],
             device_rate,
             stop_generation: 0,
@@ -415,6 +449,22 @@ impl AtomicF32 {
 mod tests {
     use super::*;
     use std::sync::mpsc::sync_channel;
+
+    #[cfg(feature = "clap")]
+    #[test]
+    fn instrument_slots_are_bounded() {
+        let shared = Shared::new();
+        for _ in 0..MAX_INSTRUMENTS {
+            shared.reserve_instrument().unwrap();
+        }
+        let err = shared.reserve_instrument().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "at most 4 instruments can be loaded at once"
+        );
+        shared.release_instrument();
+        assert!(shared.reserve_instrument().is_ok());
+    }
 
     /// A mixer and the ends of the channels a caller would hold.
     struct Harness {

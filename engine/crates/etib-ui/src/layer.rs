@@ -7,6 +7,20 @@ use winit::window::Window;
 
 use crate::composite::Composite;
 
+/// Where [`EguiLayer::render`] paints: the window it reads input from, and the
+/// image it draws over.
+#[derive(Clone, Copy)]
+pub struct PaintTarget<'a> {
+    /// The window the interface belongs to, for its input and its cursor.
+    pub window: &'a Window,
+    /// The image to paint over, which already holds the frame.
+    pub view: &'a TextureView,
+    /// The size of `view`, in physical pixels.
+    pub size_in_pixels: (u32, u32),
+    /// Where SDR white sits on the target surface.
+    pub output: Output,
+}
+
 /// Owns the egui context, the winit input bridge and the paint backend.
 ///
 /// The widgets themselves are none of this type's business: [`EguiLayer::render`]
@@ -101,17 +115,19 @@ impl EguiLayer {
     /// `output` says where SDR white sits on the target surface, so that the
     /// interface lands at the same brightness as the rest of the desktop;
     /// [`Output::SDR`] is right for an ordinary sRGB surface.
-    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         device: &Device,
         encoder: &mut Encoder,
-        window: &Window,
-        target: &TextureView,
-        size_in_pixels: (u32, u32),
-        output: Output,
+        target: PaintTarget<'_>,
         mut build_ui: impl FnMut(&mut egui::Ui),
     ) {
+        let PaintTarget {
+            window,
+            view: target,
+            size_in_pixels,
+            output,
+        } = target;
         let raw_input = self.state.take_egui_input(window);
         let painted = self.context.run_ui(raw_input, |ui| build_ui(ui));
 

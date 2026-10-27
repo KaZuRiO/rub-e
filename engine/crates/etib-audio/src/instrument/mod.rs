@@ -102,7 +102,7 @@ use log::{debug, error, info, warn};
 use crate::engine::Audio;
 use crate::error::{Error, Result};
 use crate::instrument::window::DebugWindow;
-use crate::mixer::{Command, Controls};
+use crate::mixer::{self, Command, Controls};
 use raw_window_handle::HasWindowHandle;
 
 pub(crate) use host::mark_audio_thread;
@@ -244,6 +244,10 @@ impl Audio {
             )));
         }
 
+        // Taken first and given back if anything below fails, so that the
+        // mixer never holds more instruments than it made room for.
+        let slot = InstrumentSlot::reserve(self.shared())?;
+
         // SAFETY: the caller has taken on the trust decision; passed straight down.
         let entry = unsafe { load_entry(path) }?;
         let factory = plugin_factory(&entry, path)?;
@@ -348,6 +352,7 @@ impl Audio {
             output_channels,
             reported_failure: false,
             unloaded: false,
+            slot,
         };
 
         // Handing it over is the last thing, so that nothing is half-loaded if
@@ -391,6 +396,33 @@ pub struct Instrument {
     output_channels: usize,
     reported_failure: bool,
     unloaded: bool,
+    /// This instrument's place in the mixer, given back when it is dropped.
+    slot: InstrumentSlot,
+}
+
+/// One of the mixer's [`MAX_INSTRUMENTS`](mixer::MAX_INSTRUMENTS) places,
+/// given back when dropped.
+struct InstrumentSlot(Option<Arc<mixer::Shared>>);
+
+impl InstrumentSlot {
+    fn reserve(shared: &Arc<mixer::Shared>) -> Result<Self> {
+        shared.reserve_instrument()?;
+        Ok(Self(Some(shared.clone())))
+    }
+
+    /// Keeps the place taken for good: for a plugin the audio thread never
+    /// handed back, which is still in the mixer's list.
+    fn keep(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for InstrumentSlot {
+    fn drop(&mut self) {
+        if let Some(shared) = self.0.take() {
+            shared.release_instrument();
+        }
+    }
 }
 
 /// The extensions this host uses, looked up once rather than per call.
@@ -953,11 +985,14 @@ impl Instrument {
                 info!("unloaded '{}'", self.info.name);
                 Ok(())
             }
-            Err(_) => Err(Error::new(format!(
-                "the audio thread did not hand '{}' back within {TEARDOWN_TIMEOUT:?}; \
-                 it is still loaded",
-                self.info.name
-            ))),
+            Err(_) => {
+                self.slot.keep();
+                Err(Error::new(format!(
+                    "the audio thread did not hand '{}' back within {TEARDOWN_TIMEOUT:?}; \
+                     it is still loaded",
+                    self.info.name
+                )))
+            }
         }
     }
 

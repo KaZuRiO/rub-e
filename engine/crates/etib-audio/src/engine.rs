@@ -375,6 +375,12 @@ impl Audio {
         self.commands.clone()
     }
 
+    /// What this side shares with the mixer, for the instrument count.
+    #[cfg(feature = "clap")]
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+
     /// The device's name, for a log line or an overlay.
     pub fn device(&self) -> &str {
         &self.device

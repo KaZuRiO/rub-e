@@ -48,7 +48,7 @@ mod ui;
 mod lut;
 
 use anyhow::Result;
-use etib::ui::EguiLayer;
+use etib::ui::{EguiLayer, PaintTarget};
 use etib::winit::event::WindowEvent;
 use etib::winit::window::Window;
 use etib::{App, Config, Frame, Gpu, Hdr, PostProcess};
@@ -216,10 +216,12 @@ impl App for TriangleApp {
         self.egui.render(
             &gpu.device,
             encoder,
-            &gpu.window,
-            view,
-            gpu.size(),
-            output,
+            PaintTarget {
+                window: &gpu.window,
+                view,
+                size_in_pixels: gpu.size(),
+                output,
+            },
             |ui| build_panel(ui, state, &stats),
         );
     }

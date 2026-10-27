@@ -5,10 +5,16 @@
 //!
 //! ```no_run
 //! # use etib_core::{Device, Encoder, Output, TextureView};
-//! # use etib_ui::{EguiLayer, egui};
+//! # use etib_ui::{EguiLayer, PaintTarget, egui};
 //! # fn frame(ui: &mut EguiLayer, device: &Device, encoder: &mut Encoder,
 //! #          window: &etib_ui::winit::window::Window, view: &TextureView) {
-//! ui.render(device, encoder, window, view, (1280, 800), Output::SDR, |ui| {
+//! let target = PaintTarget {
+//!     window,
+//!     view,
+//!     size_in_pixels: (1280, 800),
+//!     output: Output::SDR,
+//! };
+//! ui.render(device, encoder, target, |ui| {
 //!     egui::Panel::left("controls").show(ui, |ui| ui.label("hello"));
 //! });
 //! # }
@@ -37,7 +43,7 @@
 mod composite;
 mod layer;
 
-pub use layer::EguiLayer;
+pub use layer::{EguiLayer, PaintTarget};
 
 // Re-exported so applications build their panels against the same egui this
 // crate paints with, and can reach winit's `Window` type without a second
