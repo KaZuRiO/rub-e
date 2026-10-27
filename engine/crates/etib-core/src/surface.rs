@@ -1,5 +1,7 @@
 //! The swapchain: configuration, and acquiring an image to draw into.
 
+use std::cell::Cell;
+
 use log::{debug, error, info, trace, warn};
 
 use crate::device::Device;
@@ -49,6 +51,10 @@ pub struct Surface {
     /// Kept so the display's luminance can be re-read while running: those
     /// numbers move with the brightness slider.
     adapter: wgpu::Adapter,
+    /// Set when an image came back suboptimal. The swapchain cannot be
+    /// reconfigured while that image is held, so it is done at the start of
+    /// the next `acquire`, once the image has been presented.
+    needs_reconfigure: Cell<bool>,
 }
 
 impl Surface {
@@ -107,6 +113,7 @@ impl Surface {
             device,
             color_space,
             adapter: adapter.clone(),
+            needs_reconfigure: Cell::new(false),
         }
     }
 
@@ -150,11 +157,11 @@ impl Surface {
     /// Rebuilds the swapchain at a new size. Returns `false`, changing nothing,
     /// for an unchanged or degenerate (minimised) size.
     pub fn resize(&mut self, width: u32, height: u32) -> bool {
-        if width == 0 || height == 0 {
-            debug!("ignoring resize to {width}x{height} (window is minimised)");
+        if width == self.config.width && height == self.config.height {
             return false;
         }
-        if width == self.config.width && height == self.config.height {
+        if !clears_pending_on_resize(width, height, &self.needs_reconfigure) {
+            debug!("ignoring resize to {width}x{height} (window is minimised)");
             return false;
         }
 
@@ -173,13 +180,18 @@ impl Surface {
     pub fn acquire(&self) -> Acquired {
         use wgpu::CurrentSurfaceTexture as Current;
 
+        if take_pending(&self.needs_reconfigure) {
+            debug!("reconfiguring the surface after a suboptimal frame");
+            self.configure();
+        }
+
         let texture = match self.inner.get_current_texture() {
             Current::Success(texture) => texture,
             // Still presentable, but the swapchain no longer matches the
             // surface; draw this frame, then rebuild for the next one.
             Current::Suboptimal(texture) => {
                 debug!("surface texture is suboptimal; reconfiguring after this frame");
-                self.configure();
+                self.needs_reconfigure.set(true);
                 texture
             }
             // Usually a resize or a display change we have not seen yet.
@@ -215,6 +227,23 @@ impl Surface {
     fn configure(&self) {
         self.inner.configure(self.device.raw(), &self.config);
     }
+}
+
+/// Whether `acquire` has to reconfigure before taking the next image, clearing
+/// the request as it answers.
+fn take_pending(flag: &Cell<bool>) -> bool {
+    flag.replace(false)
+}
+
+/// The guard on a resize: `false`, leaving a pending reconfigure in place, for
+/// a degenerate (minimised) size; otherwise `true`, and the reconfigure the
+/// resize is about to do answers the pending one too.
+fn clears_pending_on_resize(width: u32, height: u32, flag: &Cell<bool>) -> bool {
+    if width == 0 || height == 0 {
+        return false;
+    }
+    flag.set(false);
+    true
 }
 
 /// Picks the format and colour space to configure.
@@ -286,6 +315,27 @@ fn select_present_mode(available: &[wgpu::PresentMode], vsync: Vsync) -> wgpu::P
 mod tests {
     use super::*;
     use wgpu::PresentMode::{Fifo, Immediate, Mailbox};
+
+    #[test]
+    fn a_pending_reconfigure_is_taken_once() {
+        let flag = Cell::new(true);
+        assert!(take_pending(&flag));
+        assert!(!take_pending(&flag));
+    }
+
+    #[test]
+    fn pending_reconfigure_survives_a_degenerate_resize() {
+        let flag = Cell::new(true);
+        assert!(!clears_pending_on_resize(0, 600, &flag));
+        assert!(flag.get());
+    }
+
+    #[test]
+    fn a_real_resize_clears_the_pending_reconfigure() {
+        let flag = Cell::new(true);
+        assert!(clears_pending_on_resize(800, 600, &flag));
+        assert!(!flag.get());
+    }
 
     #[test]
     fn vsync_on_is_fifo() {
