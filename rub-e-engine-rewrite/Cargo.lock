@@ -922,6 +922,7 @@ dependencies = [
  "env_logger",
  "etib",
  "etib-core",
+ "etib-input",
  "glam",
  "image",
  "log",

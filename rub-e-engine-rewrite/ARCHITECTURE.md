@@ -18,9 +18,11 @@ Built on [wgpu](https://wgpu.rs) 30 and [winit](https://github.com/rust-windowin
 
 ## 1. Crates
 
-Five crates, with a strict dependency rule: each knows about the layer below it
-and nothing about the layer above. Two of them are optional, and one of those —
-`etib-audio` — has nothing below it at all.
+Six crates, with a strict dependency rule: each knows about the layer below it
+and nothing about the layer above. Two of them are optional, and two —
+`etib-audio` and `etib-input` — have nothing of the workspace below them at all.
+`etib-input` sits beside the diagram: it knows winit and, behind its `gamepad`
+feature, gilrs, and draws nothing, so it needs no device.
 
 ```text
   ┌───────────────────────────────────────────────────────────────────────────┐
@@ -52,6 +54,7 @@ and nothing about the layer above. Two of them are optional, and one of those �
 | `etib-core` | Every GPU object, the swapchain, colour-space detection | winit, egui, the frame loop |
 | `etib` | The window, the frame loop, the `App` trait, the presentation passes | egui and cpal (behind the `ui` and `audio` features), what is being drawn or heard |
 | `etib-scene` | The camera and its controller, cube models, GPU frustum culling, the skybox, the `Scene` that draws them | windows, keyboards and the frame loop — the controller is told which way to `Move`; tone mapping, which is `PostProcess`'s job |
+| `etib-input` | Keyboard, mouse and gamepad state, fed from winit events and cleared once per frame | the GPU, the window, the frame loop and `App` — an application feeds it; gilrs, unless the `gamepad` feature is on |
 | `etib-ui` | egui integration and the interface composite | the frame loop — it is usable with a loop of your own |
 | `etib-audio` | The output device, the mixer, sounds in memory, and CLAP instruments | everything else in the workspace, the GPU included |
 
@@ -82,8 +85,8 @@ etib::run(Config, build)                        crates/etib/src/app.rs
   │     exists, and it has to outlive it
   │
   └─ on winit's `resumed`:
-       ├─ create_window(title, size)
-       ├─ Gpu::new -> Instance::open(window, w, h, hdr)
+       ├─ create_window(title, size, borderless fullscreen if asked)
+       ├─ Gpu::new -> Instance::open(window, w, h, hdr, vsync)
        │     ├─ create_surface
        │     ├─ request_adapter(HighPerformance, compatible surface)
        │     ├─ request_device(no optional features, downlevel limits
@@ -133,8 +136,13 @@ and would place white by a convention the platform is no longer honouring.
 Wide-gamut and PQ/HLG spaces are deliberately left alone: they change how output
 has to be encoded, and there is nothing here that would encode it.
 
-Present mode is `Mailbox` when offered, otherwise `Fifo`, with a frame latency
-of 2.
+Present mode follows `Config::vsync`, with a frame latency of 2.
+`Vsync::On`, the default, is `Fifo`: one image per refresh, as the engine's
+`vsync: true` was, so the frame rate is capped at the display's. `Vsync::Off`
+takes `Mailbox` when offered, then `Immediate` (which may tear), then `Fifo`;
+measure frame rates with it off. `Config::fullscreen` opens borderless
+fullscreen on the current monitor. Both are the engine's `config.json`
+settings; reading such a file is the application's business.
 
 ---
 
@@ -174,6 +182,13 @@ Raw device events — relative mouse motion above all, which keeps arriving once
 the cursor is captured — go to `App::device_event`. They are not tied to the
 window, so nothing in the runner acts on them; an application that does
 usually checks first that it has captured the cursor.
+
+`etib_input::Input` turns both streams into state, without anything added to
+`App`: the application owns one, passes it every event from `window_event` and
+`device_event`, reads it in `update` (`is_key_pressed`, `is_key_just_pressed`,
+`mouse_delta`, `scroll`, the gamepads), and calls `clear_frame_state` last in
+`update`, so the "just" answers and the mouse motion cover exactly one frame.
+Gamepad events are collected in that same call, ready for the next `update`.
 
 ---
 
@@ -778,9 +793,12 @@ The two examples are the reference:
 - **`etib-scene/examples/hello`** — the port of the engine's `hello`: a
   generated terrain of 10 000 cubes (or `--static <file.model>`), a cat
   orbiting it as a dynamic model, and an HDR skybox, culled on the GPU and
-  tone mapped by `PostProcess`. `C` captures the mouse to look around through
-  `App::device_event`; the title shows the frame rate and the cube counts.
-  `cargo run -p etib-scene --example hello`.
+  tone mapped by `PostProcess`. Keys and mouse go through `etib_input::Input`;
+  `C` captures the mouse to look around. `--fullscreen` and `--no-vsync` set
+  the matching `Config` fields; the title shows the frame rate and the cube
+  counts. `cargo run -p etib-scene --example hello`.
+- **`etib-input/examples/gamepads`** — prints what connected gamepads do,
+  without a window: `cargo run -p etib-input --example gamepads --features gamepad`.
 - **`examples/chart`** — four zones of known scene-referred values, so the
   differences between the curves are something you can look at rather than
   reason about. The post-processing pass is the only thing standing between
@@ -822,6 +840,9 @@ shared between them by `#[path]`.
 | `crates/etib-scene/src/culling.rs` | Chunking on the CPU, the two culling passes, the static cubes' buffers |
 | `crates/etib-scene/src/skybox.rs` | `.hdr` decoding, the equirectangular projection, the skybox pass |
 | `crates/etib-scene/src/shaders/` | `cube.wgsl`, `cull.wgsl`, `chunk_cull.wgsl`, `skybox.wgsl`, `equirectangular.wgsl` |
+| `crates/etib-input/src/input.rs` | `Input`: keyboard and mouse state, the per-frame cycle, focus loss |
+| `crates/etib-input/src/held.rs` | `Held<T>`: down / just pressed / just released, shared by keys and buttons |
+| `crates/etib-input/src/gamepad.rs` | `Gamepads`, `Gamepad`, the dead zone; gilrs, behind the `gamepad` feature |
 | `crates/etib-ui/src/layer.rs` | `EguiLayer`: input bridge and paint pass |
 | `crates/etib-ui/src/composite.rs` | The standard-range interface texture and its composite |
 | `crates/etib-audio/src/engine.rs` | `Audio`, `Play`, `Voice`; opening the device and the callback |
@@ -863,6 +884,13 @@ shared between them by `#[path]`.
   into the same submission would need the reset in the encoder instead.
 - **The scene clears its own target and depth**, so it is the first pass that
   touches them each frame.
+- **`Input::clear_frame_state` runs once per frame, last in `update`.** Read
+  before it, the "just" answers cover the frame; called twice, a press is lost.
+- **No gamepad is not an error.** Gilrs failing to start leaves an empty
+  `Gamepads`; nothing panics or returns an error for it.
+- **Losing focus releases everything held**, keys and mouse buttons, since
+  their releases go to another window; a gamepad that disconnects releases its
+  buttons the same way.
 - **The scene texture must be a float format** if anything is written above 1.0;
   `Rgba8Unorm` would clip before the tone curve ever sees it.
 - **A LUT is indexed in gamma-encoded space**, and its entries are gamma-encoded

@@ -20,18 +20,22 @@
 //! Controls: `C` captures the mouse to look around, `Escape` releases it (and
 //! quits when nothing is captured). W/A/S/D or the arrows move — by physical
 //! position, so Z/Q/S/D on an AZERTY keyboard — Space and Shift rise and fall,
-//! and the wheel changes speed, or zooms with `--isometric`.
+//! and the wheel changes speed, or zooms with `--isometric`. The keys and the
+//! mouse are read through `etib_input::Input`.
 //!
 //! `--sdr` and `--hdr` force the surface either way, as in the other examples.
-//! The window title shows the frame rate and the cube counts.
+//! `--fullscreen` opens borderless fullscreen, and `--no-vsync` lifts the cap
+//! at the display's refresh rate, which a frame rate comparison wants. The
+//! window title shows the frame rate and the cube counts.
 
 mod world;
 
 use anyhow::{Context as _, Result};
-use etib::winit::event::{DeviceEvent, ElementState, MouseScrollDelta, WindowEvent};
-use etib::winit::keyboard::{KeyCode, PhysicalKey};
+use etib::winit::event::{DeviceEvent, ElementState, WindowEvent};
+use etib::winit::keyboard::PhysicalKey;
 use etib::winit::window::{CursorGrabMode, Window};
-use etib::{App, Frame, Gpu, Grade, Hdr, Output, PostProcess};
+use etib::{App, Frame, Gpu, Grade, Hdr, Output, PostProcess, Vsync};
+use etib_input::{Input, KeyCode};
 use etib_scene::glam::{Mat4, Quat, Vec3};
 use etib_scene::{
     Camera, CameraController, CameraMode, DynamicModel, ModelCube, Move, Projection, Scene,
@@ -43,11 +47,23 @@ const SKY: &[u8] = include_bytes!("sky.hdr");
 /// Texels along each side of a skybox face.
 const SKY_FACE: u32 = 1080;
 
+/// The keys that move the camera, by physical position.
+const BINDINGS: &[(Move, &[KeyCode])] = &[
+    (Move::Forward, &[KeyCode::KeyW, KeyCode::ArrowUp]),
+    (Move::Back, &[KeyCode::KeyS, KeyCode::ArrowDown]),
+    (Move::Left, &[KeyCode::KeyA, KeyCode::ArrowLeft]),
+    (Move::Right, &[KeyCode::KeyD, KeyCode::ArrowRight]),
+    (Move::Up, &[KeyCode::Space]),
+    (Move::Down, &[KeyCode::ShiftLeft, KeyCode::ShiftRight]),
+];
+
 struct Args {
     static_model: Option<String>,
     dynamic_model: Option<String>,
     isometric: bool,
     hdr: Hdr,
+    fullscreen: bool,
+    vsync: Vsync,
 }
 
 impl Args {
@@ -57,6 +73,8 @@ impl Args {
             dynamic_model: None,
             isometric: false,
             hdr: Hdr::Allow,
+            fullscreen: false,
+            vsync: Vsync::On,
         };
         let mut iter = std::env::args().skip(1);
         while let Some(arg) = iter.next() {
@@ -70,6 +88,8 @@ impl Args {
                 "--isometric" => args.isometric = true,
                 "--sdr" => args.hdr = Hdr::Off,
                 "--hdr" => args.hdr = Hdr::Force,
+                "--fullscreen" => args.fullscreen = true,
+                "--no-vsync" => args.vsync = Vsync::Off,
                 other => anyhow::bail!("unknown argument '{other}'"),
             }
         }
@@ -104,6 +124,8 @@ fn main() -> Result<()> {
         etib::Config {
             title: "etib - hello".to_owned(),
             hdr: args.hdr,
+            fullscreen: args.fullscreen,
+            vsync: args.vsync,
             ..Default::default()
         },
         move |gpu| HelloApp::new(gpu, &static_cubes, &cat, args.isometric),
@@ -114,6 +136,7 @@ struct HelloApp {
     scene: Scene,
     camera: Camera,
     controller: CameraController,
+    input: Input,
     post: PostProcess,
     grade: Grade,
     output: Output,
@@ -176,6 +199,7 @@ impl HelloApp {
             scene,
             camera,
             controller,
+            input: Input::new(),
             post,
             grade: Grade::default(),
             output: Output::detect(gpu.color_space(), &gpu.surface.display()),
@@ -204,44 +228,23 @@ impl HelloApp {
 
 impl App for HelloApp {
     fn window_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
-        match event {
-            WindowEvent::KeyboardInput { event, .. } => {
-                let PhysicalKey::Code(code) = event.physical_key else {
-                    return false;
-                };
-                let pressed = event.state == ElementState::Pressed;
-                let direction = match code {
-                    KeyCode::KeyW | KeyCode::ArrowUp => Some(Move::Forward),
-                    KeyCode::KeyS | KeyCode::ArrowDown => Some(Move::Back),
-                    KeyCode::KeyA | KeyCode::ArrowLeft => Some(Move::Left),
-                    KeyCode::KeyD | KeyCode::ArrowRight => Some(Move::Right),
-                    KeyCode::Space => Some(Move::Up),
-                    KeyCode::ShiftLeft | KeyCode::ShiftRight => Some(Move::Down),
-                    _ => None,
-                };
-                if let Some(direction) = direction {
-                    self.controller.set(direction, pressed);
-                    return true;
-                }
-                match code {
-                    KeyCode::KeyC if pressed => {
-                        self.capture_cursor(window, true);
-                        true
-                    }
-                    // Escape releases the mouse first, and only quits when
-                    // there is nothing left to release.
-                    KeyCode::Escape if pressed && self.cursor_captured => {
-                        self.capture_cursor(window, false);
-                        true
-                    }
-                    _ => false,
-                }
+        self.input.window_event(event);
+        // Capturing the mouse needs the window, which `update` does not have.
+        let WindowEvent::KeyboardInput { event, .. } = event else {
+            return false;
+        };
+        if event.state != ElementState::Pressed {
+            return false;
+        }
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::KeyC) => {
+                self.capture_cursor(window, true);
+                true
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                self.controller.scroll(match delta {
-                    MouseScrollDelta::LineDelta(_, y) => *y,
-                    MouseScrollDelta::PixelDelta(position) => position.y as f32 * 0.1,
-                });
+            // Escape releases the mouse first, and only quits when there is
+            // nothing left to release.
+            PhysicalKey::Code(KeyCode::Escape) if self.cursor_captured => {
+                self.capture_cursor(window, false);
                 true
             }
             _ => false,
@@ -249,11 +252,7 @@ impl App for HelloApp {
     }
 
     fn device_event(&mut self, event: &DeviceEvent) {
-        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
-            && self.cursor_captured
-        {
-            self.controller.look(*dx as f32, *dy as f32);
-        }
+        self.input.device_event(event);
     }
 
     fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
@@ -270,7 +269,21 @@ impl App for HelloApp {
             cat.position = Vec3::new(t.sin() * 30.0, 6.0, t.cos() * 30.0);
             cat.rotation = Quat::from_rotation_y(-t);
         }
+
+        for &(direction, keys) in BINDINGS {
+            let held = keys.iter().any(|&key| self.input.is_key_pressed(key));
+            self.controller.set(direction, held);
+        }
+        if self.cursor_captured {
+            let delta = self.input.mouse_delta();
+            self.controller.look(delta.x, delta.y);
+        }
+        let scroll = self.input.scroll();
+        if scroll != 0.0 {
+            self.controller.scroll(scroll);
+        }
         self.controller.update(&mut self.camera, dt);
+        self.input.clear_frame_state();
     }
 
     fn render(&mut self, frame: Frame<'_>) {

@@ -16,6 +16,7 @@ anyhow = { workspace = true }
 # The example opens a window, which this crate deliberately knows nothing
 # about; the framework does that part, and only for the example.
 etib = { path = "../etib", default-features = false }
+etib-input = { workspace = true }
 env_logger = { workspace = true }
 
 [[example]]
