@@ -204,7 +204,7 @@ impl Scene {
 
         if let Some(instances) = self.dynamic.take_changes() {
             if !instances.is_empty() {
-                self.dynamic_buffer.write(device, 0, &instances);
+                self.dynamic_buffer.write(device, 0, instances);
             }
             self.dynamic_uploaded = instances.len() as u32;
         }
