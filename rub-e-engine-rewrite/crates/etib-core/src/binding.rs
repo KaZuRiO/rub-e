@@ -7,7 +7,7 @@
 use bytemuck::Pod;
 use log::debug;
 
-use crate::buffer::UniformBuffer;
+use crate::buffer::{DrawIndexedArgs, IndirectBuffer, StorageBuffer, UniformBuffer};
 use crate::device::Device;
 use crate::texture::{Sampler, StorageFormat, TextureView};
 
@@ -27,6 +27,14 @@ impl Stage {
             Self::Fragment => wgpu::ShaderStages::FRAGMENT,
         }
     }
+}
+
+/// Whether a shader may write a storage buffer, or only read it. It has to
+/// agree with the WGSL: `var<storage, read>` or `var<storage, read_write>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    Read,
+    ReadWrite,
 }
 
 /// The shape of a bind group: what it holds, in what order, and who can see it.
@@ -107,6 +115,21 @@ impl BindLayoutBuilder<'_> {
         self
     }
 
+    /// A six-layer array texture the stage writes with `textureStore`, which
+    /// is how a compute shader fills a [`TextureCube`](crate::TextureCube)
+    /// through its [`storage_view`](crate::TextureCube::storage_view).
+    pub fn storage_texture_array(mut self, stage: Stage, format: StorageFormat) -> Self {
+        self.push(
+            stage,
+            wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: format.format().raw(),
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+            },
+        );
+        self
+    }
+
     /// A texture the stage samples.
     pub fn texture(mut self, stage: Stage) -> Self {
         self.push(
@@ -128,6 +151,20 @@ impl BindLayoutBuilder<'_> {
             wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D3,
+                multisampled: false,
+            },
+        );
+        self
+    }
+
+    /// A cube texture the stage samples by direction, such as a
+    /// [`TextureCube`](crate::TextureCube) holding a skybox.
+    pub fn texture_cube(mut self, stage: Stage) -> Self {
+        self.push(
+            stage,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::Cube,
                 multisampled: false,
             },
         );
@@ -156,6 +193,20 @@ impl BindLayoutBuilder<'_> {
         self
     }
 
+    /// A [`StorageBuffer<T>`]: a `var<storage>` array of `T`. `T` fixes the
+    /// smallest size the buffer may have, one element.
+    pub fn storage_buffer<T: Pod>(mut self, stage: Stage, access: Access) -> Self {
+        self.push_storage(stage, access, size_of::<T>() as u64);
+        self
+    }
+
+    /// An [`IndirectBuffer`], for the shader that writes the draw arguments:
+    /// an array of `DrawIndexedIndirectArgs`, or a single one.
+    pub fn indirect_buffer(mut self, stage: Stage, access: Access) -> Self {
+        self.push_storage(stage, access, size_of::<DrawIndexedArgs>() as u64);
+        self
+    }
+
     pub fn finish(self) -> BindLayout {
         debug!(
             "creating bind group layout '{}' with {} binding(s)",
@@ -173,6 +224,19 @@ impl BindLayoutBuilder<'_> {
             inner,
             entries: self.entries.len(),
         }
+    }
+
+    fn push_storage(&mut self, stage: Stage, access: Access, min_size: u64) {
+        self.push(
+            stage,
+            wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage {
+                    read_only: access == Access::Read,
+                },
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(min_size),
+            },
+        );
     }
 
     fn push(&mut self, stage: Stage, ty: wgpu::BindingType) {
@@ -196,8 +260,9 @@ impl BindGroup {
 
 /// A resource that can fill one slot of a [`BindGroup`].
 ///
-/// Implemented for [`TextureView`], [`Sampler`] and [`UniformBuffer`]; it is
-/// not meant to be implemented outside this crate.
+/// Implemented for [`TextureView`], [`Sampler`], [`UniformBuffer`],
+/// [`StorageBuffer`] and [`IndirectBuffer`]; it is not meant to be implemented
+/// outside this crate.
 pub trait Bindable: sealed::Sealed {
     #[doc(hidden)]
     fn resource(&self) -> wgpu::BindingResource<'_>;
@@ -221,10 +286,22 @@ impl<T: Pod> Bindable for UniformBuffer<T> {
     }
 }
 
+impl<T: Pod> Bindable for StorageBuffer<T> {
+    fn resource(&self) -> wgpu::BindingResource<'_> {
+        self.raw().as_entire_binding()
+    }
+}
+
+impl Bindable for IndirectBuffer {
+    fn resource(&self) -> wgpu::BindingResource<'_> {
+        self.raw().as_entire_binding()
+    }
+}
+
 mod sealed {
     use bytemuck::Pod;
 
-    use crate::buffer::UniformBuffer;
+    use crate::buffer::{IndirectBuffer, StorageBuffer, UniformBuffer};
     use crate::texture::{Sampler, TextureView};
 
     pub trait Sealed {}
@@ -232,4 +309,6 @@ mod sealed {
     impl Sealed for TextureView {}
     impl Sealed for Sampler {}
     impl<T: Pod> Sealed for UniformBuffer<T> {}
+    impl<T: Pod> Sealed for StorageBuffer<T> {}
+    impl Sealed for IndirectBuffer {}
 }

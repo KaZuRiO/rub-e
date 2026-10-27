@@ -55,19 +55,28 @@ mod shader;
 mod surface;
 mod texture;
 
-pub use binding::{BindGroup, BindLayout, BindLayoutBuilder, Bindable, Stage};
-pub use buffer::UniformBuffer;
+#[cfg(test)]
+mod test_util;
+
+pub use binding::{Access, BindGroup, BindLayout, BindLayoutBuilder, Bindable, Stage};
+pub use buffer::{
+    DrawIndexedArgs, IndexBuffer, IndexFormat, IndirectBuffer, StorageBuffer, UniformBuffer,
+    VertexBuffer, VertexSource,
+};
 pub use device::Device;
 pub use display::{ColorSpace, Display, Hdr, Output, SCRGB_REFERENCE_NITS};
-pub use encoder::{Color, ComputePass, Encoder, Load, RenderPass};
+pub use encoder::{Color, ComputePass, DepthLoad, Encoder, Load, RenderPass};
 pub use error::{Error, Result};
 pub use instance::Instance;
-pub use pipeline::{Blend, ComputePipeline, RenderPipeline};
+pub use pipeline::{
+    Blend, Compare, ComputePipeline, Cull, Depth, RasterDesc, RenderPipeline, StepMode,
+    VertexAttribute, VertexFormat, VertexLayout,
+};
 pub use shader::Shader;
 pub use surface::{Acquired, Frame, Surface};
 pub use texture::{
-    Filter, RenderTexture, Sampler, StorageFormat, StorageTexture, Texture3d, TextureFormat,
-    TextureView,
+    DepthTexture, Filter, RenderTexture, Sampler, StorageFormat, StorageTexture, Texture2d,
+    Texture3d, TextureCube, TextureFormat, TextureView,
 };
 
 // For `#[derive(Pod)]` on shader parameter structs, and for interop.

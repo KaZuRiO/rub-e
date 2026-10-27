@@ -1,7 +1,8 @@
 # etib architecture
 
-etib is a small framework for windows whose contents are drawn by a compute
-shader and presented through a colour-managed pipeline. It opens the window,
+etib is a small framework for windows whose contents are drawn on the GPU — by
+a compute shader, or by rasterizing meshes with a depth buffer — and presented
+through a colour-managed pipeline. It opens the window,
 paces the frames, and owns the path from what a shader wrote to what the display
 actually shows — including the parts that stop being simple on an HDR display.
 
@@ -23,8 +24,8 @@ and nothing about the layer above. Two of them are optional, and one of those �
 
 ```text
   ┌───────────────────────────────────────────────────────────────────────────┐
-  │ your application  (examples/triangle, examples/chart)                     │
-  │   implements App, owns its compute pass, its state and its sounds         │
+  │ your application  (examples/triangle, examples/chart, examples/cube)      │
+  │   implements App, owns its scene passes, its state and its sounds         │
   └───────────┬────────────────────────┬──────────────────────────┬───────────┘
               │                        │                          │
   ┌───────────▼──────────┐  ┌──────────▼──────────┐  ┌────────────▼───────────┐
@@ -82,7 +83,8 @@ etib::run(Config, build)                        crates/etib/src/app.rs
        ├─ Gpu::new -> Instance::open(window, w, h, hdr)
        │     ├─ create_surface
        │     ├─ request_adapter(HighPerformance, compatible surface)
-       │     ├─ request_device(no optional features, downlevel limits)
+       │     ├─ request_device(no optional features, downlevel limits
+       │     │                 + 8 storage buffers per stage)
        │     └─ Surface::new -> select_output() -> configure()
        │
        └─ build(&gpu) -> App          your pipelines are created here
@@ -94,9 +96,13 @@ rather than reused.
 
 Two deliberate choices in there:
 
-- **No optional features, downlevel default limits** (`instance.rs:77`). A
-  compute pass and a fullscreen draw need nothing more, and asking for nothing
-  keeps the same binary working across backends.
+- **No optional features, downlevel default limits plus storage buffers**
+  (`open_device` in `instance.rs`). Everything is the downlevel default except
+  `max_storage_buffers_per_shader_stage`, raised from 4 to 8: GPU culling binds
+  five in a single compute stage. That is the minimum the engine needs rather
+  than the adapter's own limits, so the same binary keeps working across
+  backends, and an adapter that cannot meet it is refused at startup with an
+  error naming the limit — not later, by a pipeline that fails to validate.
 - **Blocking on the async handshake** (`pollster::block_on`). It resolves
   immediately on native backends, and it keeps every caller synchronous.
 
@@ -170,8 +176,9 @@ framework; the first is yours and the third is optional.
 
 ```text
   ┌──────────────────────────────────────────────────────────────────────┐
-  │ 1. COMPUTE                                          your code        │
-  │    dispatch_grid over an Rgba16Float StorageTexture                  │
+  │ 1. SCENE                                            your code        │
+  │    COMPUTE: dispatch_grid over an Rgba16Float StorageTexture, or     │
+  │    RASTER:  draws into an Rgba16Float RenderTexture + DepthTexture   │
   │    writes SCENE-REFERRED values - 1.0 is not a limit                 │
   └───────────────────────────────┬──────────────────────────────────────┘
                                   │  sampled
@@ -577,11 +584,14 @@ you to keep straight against the WGSL.
 | Type | Written by | Used for |
 |---|---|---|
 | `StorageTexture` | a compute shader (`textureStore`) | the scene. Always a linear format — storage writes are not defined for sRGB |
-| `RenderTexture` | a render pass | intermediates; the interface texture |
+| `RenderTexture` | a render pass | a rasterized scene; intermediates; the interface texture |
+| `DepthTexture` | a render pass with depth | the depth buffer paired with a rasterized scene. Always `Depth32Float` |
+| `Texture2d` | the CPU, once at creation | images such as an HDR environment map. `Rgba16Float` |
+| `TextureCube` | a compute shader, through its six-layer `storage_view` | a skybox, sampled through `view` as a `texture_cube` |
 | `Texture3d` | the CPU, once at creation | lookup tables. `Rgba16Float`, filterable everywhere |
 
-The first two resize with the window and report whether the view actually
-changed, which is the caller's cue to rebuild bind groups. That handshake is the
+The three window-sized ones — storage, render and depth — resize with the
+window and report whether the view actually changed, which is the caller's cue to rebuild bind groups. That handshake is the
 one piece of protocol an application has to get right:
 
 ```rust
@@ -601,6 +611,41 @@ correct). WGSL's alignment rules are the caller's problem: trailing padding is
 spelled out in the Rust struct, because bytemuck will not derive `Pod` for a
 struct with padding it cannot see.
 
+### Buffers
+
+| Type | Holds | Bound as |
+|---|---|---|
+| `VertexBuffer<T>` | per-vertex or per-instance elements | a vertex buffer slot |
+| `IndexBuffer` | `u16` or `u32` indices | the index buffer |
+| `StorageBuffer<T>` | an array of `T` | `var<storage>`, read or read-write — **and** a vertex buffer slot |
+| `IndirectBuffer` | `DrawIndexedArgs`, one per draw | `var<storage>` for the shader that fills it, then `draw_indexed_indirect` |
+
+A `StorageBuffer` doubles as a vertex buffer so that a compute pass can write
+the instances a later draw reads, and an `IndirectBuffer` doubles as storage so
+that the same pass can write how many there are: that pair is what GPU culling
+needs, and it means the CPU never waits to learn the count. Whether a shader
+may write a storage binding is a property of the layout
+(`storage_buffer::<T>(stage, Access::ReadWrite)`), not of the buffer.
+
+`write` on all of them has the same semantics as on `UniformBuffer`, and
+refuses — with a panic naming both numbers — a write that would run past the
+end. That is also how a culling counter is put back to zero each frame:
+`indirect.write(device, 0, &args)` before the pass that increments it.
+
+### Vertex layouts and raster pipelines
+
+`RenderPipeline::raster` takes a `RasterDesc`: the bind group layouts (the nth
+is `@group(n)`), one `VertexLayout` per vertex buffer slot — a stride, a
+`StepMode::{Vertex, Instance}` and `VertexAttribute { location, offset,
+format }`s — plus the target format, an optional `Depth { write, compare }`,
+the blend and the face culling. Counter-clockwise is the front face. These are
+this crate's own types, converted to wgpu's inside, so a mesh is described
+without naming the backend.
+
+A pipeline with depth has to be drawn in a pass opened by
+`Encoder::render_pass_with_depth`, and one without in a pass opened by
+`render_pass`; the backend validates the pairing.
+
 ### Passes
 
 `Encoder` is one per frame. `compute_pass` and `render_pass` return guards that
@@ -608,6 +653,12 @@ end when dropped; internally they erase the wgpu pass lifetime and re-borrow the
 encoder through `PhantomData`, so the safe API keeps the borrow that wgpu's own
 type would have given you. `dispatch_grid` rounds the workgroup count up and
 leaves the shader to discard the overhang.
+
+`dispatch` and `draw` set a pipeline and `@group(0)` and run in one call, which
+is all a single-group pass needs. Passes with several groups or with buffers
+use the long form: `set_pipeline`, `set_bind_group(index, …)`, then
+`dispatch_workgroups` — or, in a render pass, `set_vertex_buffer`,
+`set_index_buffer`, and `draw_indexed` / `draw_indexed_indirect`.
 
 ---
 
@@ -666,13 +717,19 @@ The two examples are the reference:
   controls do to them. It opens no window, so it is also the quickest way to
   hear whether a machine's audio works at all:
   `cargo run -p etib-audio --example beep`.
+- **`examples/cube`** — 4096 instanced cubes, depth-tested into an
+  `Rgba16Float` render texture and tone mapped by `PostProcess`. The
+  smallest use of the raster side: the instances live in a `StorageBuffer` and
+  the draw is indirect, which is the shape a culling pass slots in front of.
+  Its window title shows the frame rate, and it needs neither `ui` nor
+  `audio`.
 - **`examples/chart`** — four zones of known scene-referred values, so the
   differences between the curves are something you can look at rather than
   reason about. The post-processing pass is the only thing standing between
   those values and the window.
 
-Both take `--sdr` / `--hdr` to force the surface either way, and
-`--lut teal|<file.cube>` to grade through a table. `examples/common/lut.rs` is
+All three take `--sdr` / `--hdr` to force the surface either way; the triangle
+and the chart also take `--lut teal|<file.cube>` to grade through a table. `examples/common/lut.rs` is
 shared between them by `#[path]`.
 
 ---
@@ -681,15 +738,16 @@ shared between them by `#[path]`.
 
 | Path | What lives there |
 |---|---|
-| `crates/etib-core/src/instance.rs` | Backend connection; adapter and device opening |
+| `crates/etib-core/src/instance.rs` | Backend connection; adapter and device opening; the limits asked for |
 | `crates/etib-core/src/device.rs` | Device + queue handle, encoder creation, submission |
 | `crates/etib-core/src/surface.rs` | Swapchain config, format/colour-space choice, acquire |
 | `crates/etib-core/src/display.rs` | `ColorSpace`, `Hdr`, `Display`, `Output` |
-| `crates/etib-core/src/texture.rs` | Formats, `StorageTexture`, `RenderTexture`, `Texture3d`, samplers |
+| `crates/etib-core/src/texture.rs` | Formats, `StorageTexture`, `RenderTexture`, `DepthTexture`, `Texture2d`, `TextureCube`, `Texture3d`, samplers |
 | `crates/etib-core/src/binding.rs` | `BindLayout` builder, `BindGroup`, `Bindable` |
-| `crates/etib-core/src/buffer.rs` | `UniformBuffer<T>` |
-| `crates/etib-core/src/pipeline.rs` | `ComputePipeline`, `RenderPipeline::screen`, `Blend` |
-| `crates/etib-core/src/encoder.rs` | `Encoder`, `ComputePass`, `RenderPass`, `Load`, `Color` |
+| `crates/etib-core/src/buffer.rs` | `UniformBuffer<T>`, `VertexBuffer<T>`, `IndexBuffer`, `StorageBuffer<T>`, `IndirectBuffer`, `DrawIndexedArgs` |
+| `crates/etib-core/src/pipeline.rs` | `ComputePipeline`, `RenderPipeline::{screen, raster}`, `RasterDesc`, vertex layouts, `Depth`, `Cull`, `Blend` |
+| `crates/etib-core/src/encoder.rs` | `Encoder`, `ComputePass`, `RenderPass`, `Load`, `DepthLoad`, `Color` |
+| `crates/etib-core/src/test_util.rs` | Tests only: a windowless device with the same limits, or a skip without a GPU |
 | `crates/etib-core/src/shader.rs` | WGSL module compilation |
 | `crates/etib-core/src/error.rs` | The single error type |
 | `crates/etib/src/app.rs` | `Config`, `App`, `Frame`, `FrameStats`, `run`, the winit runner |
@@ -723,6 +781,15 @@ shared between them by `#[path]`.
 - **The interface is drawn after the grade, never through it** — its colours are
   already display-referred.
 - **`Output` is per-frame information, not startup information.** Poll it.
+- **Depth goes with its colour target.** A `DepthTexture` is resized with the
+  render texture it is paired with, and a pipeline created with a `Depth` is
+  only drawn in a pass opened with one.
+- **Eight storage buffers per stage is a requirement, not a hope.** An adapter
+  that offers fewer is refused when the device is opened; nothing past that
+  point checks again.
+- **What a draw consumes from a compute pass stays on the GPU.** Instances in
+  a `StorageBuffer` and counts in an `IndirectBuffer` are written and read in
+  the same submission; nothing reads them back to decide what to draw.
 - **The scene texture must be a float format** if anything is written above 1.0;
   `Rgba8Unorm` would clip before the tone curve ever sees it.
 - **A LUT is indexed in gamma-encoded space**, and its entries are gamma-encoded

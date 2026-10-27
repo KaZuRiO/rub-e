@@ -72,20 +72,71 @@ impl Instance {
         }))
         .map_err(|err| Error::new("no graphics adapter supports this surface", err))?;
 
-        // Ask for nothing beyond the downlevel defaults and stay portable; a
-        // compute pass and a fullscreen blit need no optional features.
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("etib device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-            ..Default::default()
-        }))
-        .map_err(|err| Error::new("failed to open a graphics device", err))?;
-        info!("device opened");
-
-        let device = Device::new(device, queue, &adapter);
+        let device = open_device(&adapter)?;
         let surface = Surface::new(surface, &adapter, device.clone(), width, height, hdr);
 
         Ok((device, surface))
     }
 }
+
+/// Storage buffers a single shader stage may bind. The downlevel default is 4,
+/// and GPU culling binds 5 in one compute stage; 8 is what every desktop
+/// adapter offers.
+pub(crate) const STORAGE_BUFFERS_PER_STAGE: u32 = 8;
+
+/// The device everything in this crate runs on: no optional features, and the
+/// downlevel default limits except for the storage buffers per stage.
+///
+/// Asking for the minimum rather than the adapter's own limits keeps the same
+/// binary working across backends, and a machine that cannot meet it is told
+/// so at startup rather than when a pipeline fails to validate.
+pub(crate) fn open_device(adapter: &wgpu::Adapter) -> Result<Device> {
+    let offered = adapter.limits();
+    if offered.max_storage_buffers_per_shader_stage < STORAGE_BUFFERS_PER_STAGE {
+        return Err(Error::new(
+            "the graphics adapter cannot bind enough storage buffers per shader stage",
+            LimitTooLow {
+                limit: "max_storage_buffers_per_shader_stage",
+                needed: STORAGE_BUFFERS_PER_STAGE,
+                offered: offered.max_storage_buffers_per_shader_stage,
+            },
+        ));
+    }
+
+    let required_limits = wgpu::Limits {
+        max_storage_buffers_per_shader_stage: STORAGE_BUFFERS_PER_STAGE,
+        ..wgpu::Limits::downlevel_defaults()
+    }
+    .using_resolution(offered);
+
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("etib device"),
+        required_features: wgpu::Features::empty(),
+        required_limits,
+        ..Default::default()
+    }))
+    .map_err(|err| Error::new("failed to open a graphics device", err))?;
+    info!("device opened");
+
+    Ok(Device::new(device, queue, adapter))
+}
+
+/// The detail behind a refused adapter: which limit, and by how much.
+#[derive(Debug)]
+struct LimitTooLow {
+    limit: &'static str,
+    needed: u32,
+    offered: u32,
+}
+
+impl std::fmt::Display for LimitTooLow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is {} but at least {} is needed",
+            self.limit, self.offered, self.needed
+        )
+    }
+}
+
+impl std::error::Error for LimitTooLow {}

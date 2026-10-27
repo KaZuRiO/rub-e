@@ -6,9 +6,10 @@ use std::ops::Range;
 use log::trace;
 
 use crate::binding::BindGroup;
+use crate::buffer::{IndexBuffer, IndirectBuffer, VertexSource};
 use crate::device::Device;
 use crate::pipeline::{ComputePipeline, RenderPipeline};
-use crate::texture::TextureView;
+use crate::texture::{DepthTexture, TextureView};
 
 /// A colour in linear space, 0..1 per channel.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -42,6 +43,15 @@ pub enum Load {
     /// Overwrite everything with this colour first.
     Clear(Color),
     /// Keep what is there and draw over it.
+    Keep,
+}
+
+/// What a render pass does with the depth buffer's existing contents.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DepthLoad {
+    /// Reset every depth to this value first; 1.0 is the far plane.
+    Clear(f32),
+    /// Keep the depths an earlier pass left, to draw more into the same scene.
     Keep,
 }
 
@@ -83,6 +93,30 @@ impl Encoder {
         target: &TextureView,
         load: Load,
     ) -> RenderPass<'a> {
+        self.begin_render_pass(label, target, load, None)
+    }
+
+    /// Opens a render pass drawing into `target` and depth-testing against
+    /// `depth`, which must be the same size. Pipelines drawn in it must have
+    /// been created with a [`Depth`](crate::Depth).
+    pub fn render_pass_with_depth<'a>(
+        &'a mut self,
+        label: &str,
+        target: &TextureView,
+        load: Load,
+        depth: &DepthTexture,
+        depth_load: DepthLoad,
+    ) -> RenderPass<'a> {
+        self.begin_render_pass(label, target, load, Some((depth, depth_load)))
+    }
+
+    fn begin_render_pass<'a>(
+        &'a mut self,
+        label: &str,
+        target: &TextureView,
+        load: Load,
+        depth: Option<(&DepthTexture, DepthLoad)>,
+    ) -> RenderPass<'a> {
         let pass = self.inner.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -102,7 +136,19 @@ impl Encoder {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: depth.map(|(depth, load)| {
+                wgpu::RenderPassDepthStencilAttachment {
+                    view: depth.view().raw(),
+                    depth_ops: Some(wgpu::Operations {
+                        load: match load {
+                            DepthLoad::Clear(value) => wgpu::LoadOp::Clear(value),
+                            DepthLoad::Keep => wgpu::LoadOp::Load,
+                        },
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }
+            }),
             ..Default::default()
         });
         RenderPass {
@@ -130,6 +176,26 @@ pub struct ComputePass<'a> {
 }
 
 impl ComputePass<'_> {
+    /// Selects the pipeline for the dispatches that follow. Together with
+    /// [`set_bind_group`](Self::set_bind_group) and
+    /// [`dispatch_workgroups`](Self::dispatch_workgroups), this is the long
+    /// form of [`dispatch`](Self::dispatch), for a pipeline with more than one
+    /// bind group.
+    pub fn set_pipeline(&mut self, pipeline: &ComputePipeline) {
+        self.inner.set_pipeline(pipeline.raw());
+    }
+
+    /// Binds `bindings` as `@group(index)`.
+    pub fn set_bind_group(&mut self, index: u32, bindings: &BindGroup) {
+        self.inner.set_bind_group(index, bindings.raw(), &[]);
+    }
+
+    /// Runs `x`×`y`×`z` workgroups of the current pipeline.
+    pub fn dispatch_workgroups(&mut self, x: u32, y: u32, z: u32) {
+        trace!("dispatching {x}x{y}x{z} workgroups");
+        self.inner.dispatch_workgroups(x, y, z);
+    }
+
     /// Runs `workgroups` workgroups of `pipeline`.
     pub fn dispatch(
         &mut self,
@@ -184,6 +250,41 @@ impl RenderPass<'_> {
         self.inner.set_pipeline(pipeline.raw());
         self.inner.set_bind_group(0, bindings.raw(), &[]);
         self.inner.draw(vertices, 0..1);
+    }
+
+    /// Selects the pipeline for the draws that follow. With the other setters
+    /// below, this is the long form of [`draw`](Self::draw), for meshes.
+    pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) {
+        self.inner.set_pipeline(pipeline.raw());
+    }
+
+    /// Binds `bindings` as `@group(index)`.
+    pub fn set_bind_group(&mut self, index: u32, bindings: &BindGroup) {
+        self.inner.set_bind_group(index, bindings.raw(), &[]);
+    }
+
+    /// Reads vertex buffer `slot` of the pipeline's layout from `buffer`.
+    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &impl VertexSource) {
+        self.inner
+            .set_vertex_buffer(slot, buffer.vertex_buffer().slice(..));
+    }
+
+    pub fn set_index_buffer(&mut self, buffer: &IndexBuffer) {
+        self.inner
+            .set_index_buffer(buffer.raw().slice(..), buffer.format().raw());
+    }
+
+    /// Draws `indices` of the current index buffer, `instances` times, with
+    /// `base_vertex` added to each index.
+    pub fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        self.inner.draw_indexed(indices, base_vertex, instances);
+    }
+
+    /// Draws with the arguments in draw `index` of `buffer`, as whatever pass
+    /// wrote them left them.
+    pub fn draw_indexed_indirect(&mut self, buffer: &IndirectBuffer, index: u32) {
+        self.inner
+            .draw_indexed_indirect(buffer.raw(), buffer.offset_of(index));
     }
 
     /// Interop: the underlying wgpu pass.

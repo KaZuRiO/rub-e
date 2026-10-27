@@ -394,6 +394,250 @@ impl Texture3d {
     }
 }
 
+/// A depth buffer, for a render pass that has to know what is in front.
+///
+/// Always `Depth32Float`, which every backend supports as an attachment. It
+/// resizes with the colour target it is paired with, and like the other
+/// window-sized textures reports when it actually did.
+pub struct DepthTexture {
+    /// Held so the view stays valid.
+    _texture: wgpu::Texture,
+    view: TextureView,
+    size: (u32, u32),
+    label: String,
+}
+
+impl DepthTexture {
+    pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+    pub fn new(device: &Device, label: &str, width: u32, height: u32) -> Self {
+        let (texture, view) = create_depth(device, label, width, height);
+        Self {
+            _texture: texture,
+            view,
+            size: (width, height),
+            label: label.to_owned(),
+        }
+    }
+
+    /// The view, as a depth attachment or as a binding to sample.
+    pub fn view(&self) -> &TextureView {
+        &self.view
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    /// Recreates the texture at a new size, returning `true` when it actually
+    /// changed; an unchanged or degenerate size is ignored.
+    pub fn resize(&mut self, device: &Device, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 || (width, height) == self.size {
+            return false;
+        }
+
+        debug!(
+            "recreating depth texture '{}' {}x{} -> {width}x{height}",
+            self.label, self.size.0, self.size.1
+        );
+        let (texture, view) = create_depth(device, &self.label, width, height);
+        self._texture = texture;
+        self.view = view;
+        self.size = (width, height);
+        true
+    }
+}
+
+fn create_depth(
+    device: &Device,
+    label: &str,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, TextureView) {
+    debug!("allocating {width}x{height} depth texture '{label}'");
+    let texture = device.raw().create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DepthTexture::FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = TextureView::from_raw(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+    (texture, view)
+}
+
+/// Six square faces sampled by direction, such as a skybox.
+///
+/// A compute shader fills it — typically by projecting an equirectangular
+/// image — through [`TextureCube::storage_view`], which sees the faces as a
+/// six-layer array (`texture_storage_2d_array`). Everything else samples it
+/// through [`TextureCube::view`] as a `texture_cube`.
+pub struct TextureCube {
+    /// Held so the views stay valid.
+    _texture: wgpu::Texture,
+    view: TextureView,
+    storage_view: TextureView,
+    format: StorageFormat,
+    size: u32,
+}
+
+impl TextureCube {
+    /// # Panics
+    ///
+    /// If `size` is zero.
+    pub fn new(device: &Device, label: &str, size: u32, format: StorageFormat) -> Self {
+        assert!(size > 0, "cube texture '{label}' cannot be empty");
+        debug!("allocating {size}x{size}x6 {format:?} cube texture '{label}'");
+        let texture = device.raw().create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: format.raw(),
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = TextureView::from_raw(texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some(label),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        }));
+        let storage_view =
+            TextureView::from_raw(texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(label),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            }));
+        Self {
+            _texture: texture,
+            view,
+            storage_view,
+            format,
+            size,
+        }
+    }
+
+    /// The view to sample, bound with
+    /// [`BindLayoutBuilder::texture_cube`](crate::BindLayoutBuilder::texture_cube).
+    pub fn view(&self) -> &TextureView {
+        &self.view
+    }
+
+    /// The faces as a six-layer array for a compute shader to write, bound with
+    /// [`BindLayoutBuilder::storage_texture_array`](crate::BindLayoutBuilder::storage_texture_array).
+    pub fn storage_view(&self) -> &TextureView {
+        &self.storage_view
+    }
+
+    pub fn format(&self) -> StorageFormat {
+        self.format
+    }
+
+    /// The length of one face's side, in texels.
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+}
+
+/// An image the CPU uploads once and a shader samples, such as a decoded HDR
+/// environment map.
+///
+/// Half-float RGBA, like [`Texture3d`], so values above 1.0 survive and the
+/// texture is filterable everywhere.
+pub struct Texture2d {
+    /// Held so the view stays valid.
+    _texture: wgpu::Texture,
+    view: TextureView,
+    size: (u32, u32),
+}
+
+impl Texture2d {
+    /// Creates a `width`×`height` texture from `rgba`, four floats per texel,
+    /// row by row from the top.
+    ///
+    /// # Panics
+    ///
+    /// If either side is zero, or `rgba` is not exactly `width × height × 4`
+    /// floats long.
+    pub fn from_rgba_f32(
+        device: &Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba: &[f32],
+    ) -> Self {
+        assert!(
+            width > 0 && height > 0,
+            "2D texture '{label}' cannot be empty"
+        );
+        let expected = width as usize * height as usize * 4;
+        assert_eq!(
+            rgba.len(),
+            expected,
+            "2D texture '{label}' is {width}x{height} texels, so it needs {expected} floats, not {}",
+            rgba.len()
+        );
+
+        debug!("allocating {width}x{height} Rgba16Float texture '{label}'");
+        let extent = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.raw().create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let halves: Vec<u16> = rgba.iter().copied().map(to_f16).collect();
+        device.raw_queue().write_texture(
+            texture.as_image_copy(),
+            bytemuck::cast_slice(&halves),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 8),
+                rows_per_image: Some(height),
+            },
+            extent,
+        );
+
+        let view =
+            TextureView::from_raw(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        Self {
+            _texture: texture,
+            view,
+            size: (width, height),
+        }
+    }
+
+    /// The view to bind.
+    pub fn view(&self) -> &TextureView {
+        &self.view
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+}
+
 /// Encodes a float as a half, rounding to nearest.
 ///
 /// Values past half's range (65504) become infinity, as they would under any
@@ -496,5 +740,34 @@ mod tests {
         assert!((from_f16(to_f16(1.0e-7)) - 1.0e-7).abs() <= subnormal_step);
         // And under those, where there is nothing left to represent.
         assert_eq!(from_f16(to_f16(1.0e-30)), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+    use crate::test_util;
+
+    #[test]
+    fn depth_resizes_only_when_it_has_to() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        let mut depth = DepthTexture::new(&device, "test depth", 64, 32);
+        assert!(!depth.resize(&device, 64, 32), "same size");
+        assert!(!depth.resize(&device, 0, 32), "degenerate size");
+        assert!(depth.resize(&device, 128, 64));
+        assert_eq!(depth.size(), (128, 64));
+    }
+
+    #[test]
+    fn cube_and_image_textures_are_created() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        let cube = TextureCube::new(&device, "test cube", 16, StorageFormat::Rgba16Float);
+        assert_eq!(cube.size(), 16);
+        let image = Texture2d::from_rgba_f32(&device, "test image", 4, 2, &[0.5; 32]);
+        assert_eq!(image.size(), (4, 2));
     }
 }
