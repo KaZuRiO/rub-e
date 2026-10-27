@@ -1,0 +1,36 @@
+[package]
+name = "etib-games"
+version.workspace = true
+edition.workspace = true
+description = "The engine's games and demos, ported: pong, the physics demo and the sounds demo"
+publish = false
+
+# Programs rather than a library's examples: they pull in what a game needs —
+# argument parsing, a network protocol, UI, sound, gamepads — and none of it
+# should reach the dependencies of the crates they demonstrate.
+[[bin]]
+name = "pong"
+path = "pong/main.rs"
+
+[[bin]]
+name = "physics"
+path = "physics.rs"
+
+[[bin]]
+name = "sounds"
+path = "sounds.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+bincode = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+etib = { path = "../crates/etib", default-features = false, features = ["ui", "audio"] }
+etib-audio = { workspace = true, features = ["mp3"] }
+etib-input = { workspace = true, features = ["gamepad"] }
+etib-physics = { workspace = true }
+etib-scene = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

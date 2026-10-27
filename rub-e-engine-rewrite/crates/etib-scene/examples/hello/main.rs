@@ -43,7 +43,7 @@ use etib_scene::{
 };
 use log::info;
 
-const SKY: &[u8] = include_bytes!("sky.hdr");
+const SKY: &[u8] = include_bytes!("../../../../assets/sky.hdr");
 /// Texels along each side of a skybox face.
 const SKY_FACE: u32 = 1080;
 

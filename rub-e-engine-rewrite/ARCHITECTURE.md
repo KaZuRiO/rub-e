@@ -27,7 +27,7 @@ Neither draws anything, so neither needs a device.
 
 ```text
   ┌───────────────────────────────────────────────────────────────────────────┐
-  │ your application  (examples/triangle, chart, cube; etib-scene's hello)    │
+  │ your application  (crates/etib/examples, hello, examples/ — pong & co.)   │
   │   implements App, owns its scene passes, its state and its sounds         │
   └──────┬──────────────────┬──────────────────┬───────────────────┬──────────┘
          │                  │                  │                   │
@@ -842,12 +842,42 @@ All of them take `--sdr` / `--hdr` to force the surface either way; the triangle
 and the chart also take `--lut teal|<file.cube>` to grade through a table. `examples/common/lut.rs` is
 shared between them by `#[path]`.
 
+### The games
+
+The engine's games are in the workspace-level `examples/` directory, a package
+of its own (`etib-games`), because they pull in what a game needs — argument
+parsing, a network protocol, an interface, sound, gamepads — and none of that
+belongs in the dependencies of the crates they show off. They are its
+binaries, and use every crate: `etib` with `ui` and `audio`, `etib-scene`,
+`etib-input` with `gamepad`, `etib-audio` with `mp3`, and `etib-physics`.
+
+- **`pong`** — the engine's Pong 3D in the Orange Vélodrome: two players on one
+  keyboard or two gamepads, `--demo` / `--demo2` to watch it play itself, and
+  `--server` / `--client <ip>` over UDP. The modules follow a frame: `input`
+  makes a `PlayerInput`, `state` runs the rules (shared with the headless
+  server in `net`), `game` moves the `stadium`'s models, the effects and the
+  `sound`, and `ui` draws the menus. The rules and the stadium are held to the
+  engine's by tests that run the original code beside them, and the network
+  messages are bincode 1 as before, so either build talks to the other.
+  `cargo run -p etib-games --bin pong`.
+- **`physics`** — eight cubes dropped onto a floor through `etib-physics`,
+  bouncing, colliding and settling onto a face; `R` drops them again.
+- **`sounds`** — a beeping cube at the origin to fly around with headphones.
+
+Both demos share `examples/common/fly.rs`, a free camera on `etib-input`.
+Every program's sky and sounds are in the workspace's `assets/`, built into
+the binaries with `include_bytes!` so nothing has to be found at runtime.
+
 ---
 
 ## 11. File map
 
 | Path | What lives there |
 |---|---|
+| `assets/` | `sky.hdr`, the pong crowd's MP3s, `beep.wav`: built into the programs that use them |
+| `examples/pong/state.rs` | Pong's rules: `Ball`, `Player`, `PlayerInput`, `step_physics` |
+| `examples/pong/net.rs` | Pong's UDP protocol, client and headless server |
+| `examples/pong/game.rs` | `PongApp`: the scene, the effects, the menus and the sound, frame by frame |
 | `crates/etib-core/src/instance.rs` | Backend connection; adapter and device opening; the limits asked for |
 | `crates/etib-core/src/device.rs` | Device + queue handle, encoder creation, submission |
 | `crates/etib-core/src/surface.rs` | Swapchain config, format/colour-space choice, acquire |
