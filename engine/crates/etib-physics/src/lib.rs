@@ -156,9 +156,9 @@ pub struct RigidBody {
     /// Coulomb friction coefficient used for surface contacts (floor + other cubes).
     pub floor_friction: f32,
     /// Half the cube side (centre to face).
-    pub half_side: f32,
+    half_side: f32,
     /// Mass in kg.
-    pub mass: f32,
+    mass: f32,
     /// True while the cube is in contact with the floor.
     pub on_ground: bool,
     /// Wall bounds [x_min, x_max, z_min, z_max].
@@ -221,6 +221,18 @@ impl RigidBody {
         self
     }
 
+    /// Half the cube side (centre to face). Set with
+    /// [`with_half_side`](Self::with_half_side), which keeps it positive.
+    pub fn half_side(&self) -> f32 {
+        self.half_side
+    }
+
+    /// Mass in kg. Set with [`with_mass`](Self::with_mass), which keeps it
+    /// positive: every impulse divides by it.
+    pub fn mass(&self) -> f32 {
+        self.mass
+    }
+
     /// Moment of inertia for a uniform solid cube rotating about an axis
     /// through its centre: I = m·a² / 6  where a = side length.
     pub fn inertia(&self) -> f32 {
@@ -230,6 +242,7 @@ impl RigidBody {
 
     /// Advance one frame.
     pub fn update(&mut self, position: &mut Vec3, rotation: &mut Quat, dt: f32, floor_y: f32) {
+        debug_assert!(self.mass > 0.0, "a rigid body's mass must be positive");
         // Gravity (only on Y)
         self.linear_velocity.y -= GRAVITY * dt;
 
@@ -489,6 +502,10 @@ pub fn apply_cube_collision(
     let penetration = min_dist - dist;
 
     // Push the two cubes apart proportional to inverse mass
+    debug_assert!(
+        a.mass > 0.0 && b.mass > 0.0,
+        "a rigid body's mass must be positive"
+    );
     let inv_a = 1.0 / a.mass;
     let inv_b = 1.0 / b.mass;
     let share = 1.0 / (inv_a + inv_b);
@@ -567,6 +584,24 @@ mod tests {
 
     fn identity() -> Quat {
         Quat::IDENTITY
+    }
+
+    #[test]
+    fn a_zero_mass_is_refused() {
+        assert_eq!(RigidBody::new().with_mass(0.0).mass(), 0.001);
+        assert_eq!(RigidBody::new().with_half_side(0.0).half_side(), 0.001);
+    }
+
+    #[test]
+    fn a_body_built_from_extreme_values_stays_finite() {
+        let mut body = RigidBody::new().with_mass(0.0).with_half_side(0.0);
+        let mut position = Vec3::new(0.0, 10.0, 0.0);
+        let mut rotation = Quat::IDENTITY;
+        for _ in 0..600 {
+            body.update(&mut position, &mut rotation, 1.0 / 60.0, 0.0);
+            assert!(position.is_finite(), "{position}");
+            assert!(rotation.is_finite(), "{rotation}");
+        }
     }
 
     // ── Builder / defaults ────────────────────────────────────────────────────

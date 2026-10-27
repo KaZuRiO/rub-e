@@ -286,7 +286,8 @@ impl PhysicsDemo {
         let n = self.cubes.len();
         for i in 0..n {
             for j in (i + 1)..n {
-                let min_dist = (self.cubes[i].body.half_side + self.cubes[j].body.half_side) * 1.2;
+                let min_dist =
+                    (self.cubes[i].body.half_side() + self.cubes[j].body.half_side()) * 1.2;
                 if (positions[i] - positions[j]).length_squared() >= min_dist * min_dist {
                     continue;
                 }
