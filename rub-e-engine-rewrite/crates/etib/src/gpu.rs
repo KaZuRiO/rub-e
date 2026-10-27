@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use etib_core::{ColorSpace, Device, Hdr, Instance, Surface, TextureFormat};
+use etib_core::{ColorSpace, Device, Hdr, Instance, Surface, TextureFormat, Vsync};
 use log::info;
 use winit::window::Window;
 
@@ -19,7 +19,12 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    pub(crate) fn new(instance: &Instance, window: Arc<Window>, hdr: Hdr) -> Result<Self> {
+    pub(crate) fn new(
+        instance: &Instance,
+        window: Arc<Window>,
+        hdr: Hdr,
+        vsync: Vsync,
+    ) -> Result<Self> {
         let size = window.inner_size();
         info!(
             "opening a device for the window ({}x{}, scale factor {:.2})",
@@ -29,7 +34,7 @@ impl Gpu {
         );
 
         let (device, surface) = instance
-            .open(window.clone(), size.width, size.height, hdr)
+            .open(window.clone(), size.width, size.height, hdr, vsync)
             .context("failed to open a graphics device for the window")?;
 
         Ok(Self {

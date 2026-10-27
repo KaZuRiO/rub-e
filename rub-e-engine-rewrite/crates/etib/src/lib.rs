@@ -130,7 +130,7 @@ pub use etib_audio as audio;
 pub use etib_core::{
     BindGroup, BindLayout, Blend, Color, ColorSpace, ComputePipeline, Device, Display, Encoder,
     Hdr, Load, Output, RenderPipeline, RenderTexture, Shader, Stage, StorageFormat, StorageTexture,
-    Surface, TextureFormat, TextureView, UniformBuffer,
+    Surface, TextureFormat, TextureView, UniformBuffer, Vsync,
 };
 
 // Re-exported so downstream code cannot accidentally link a second, mismatched

@@ -64,7 +64,7 @@ pub use buffer::{
     VertexBuffer, VertexSource,
 };
 pub use device::Device;
-pub use display::{ColorSpace, Display, Hdr, Output, SCRGB_REFERENCE_NITS};
+pub use display::{ColorSpace, Display, Hdr, Output, SCRGB_REFERENCE_NITS, Vsync};
 pub use encoder::{Color, ComputePass, DepthLoad, Encoder, Load, RenderPass};
 pub use error::{Error, Result};
 pub use instance::Instance;

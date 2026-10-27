@@ -7,7 +7,7 @@ use log::info;
 use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 
 use crate::device::Device;
-use crate::display::Hdr;
+use crate::display::{Hdr, Vsync};
 use crate::error::{Error, Result};
 use crate::surface::Surface;
 
@@ -38,7 +38,8 @@ impl Instance {
     ///
     /// `hdr` says whether to take an extended-range surface when the platform
     /// offers one; [`Surface::color_space`] reports what was actually
-    /// configured, which is what the application has to encode for.
+    /// configured, which is what the application has to encode for. `vsync`
+    /// picks the presentation mode.
     ///
     /// The window is kept alive by the returned [`Surface`] for as long as it
     /// exists, so the caller may drop its own handle.
@@ -51,6 +52,7 @@ impl Instance {
         width: u32,
         height: u32,
         hdr: Hdr,
+        vsync: Vsync,
     ) -> Result<(Device, Surface)>
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
@@ -73,7 +75,7 @@ impl Instance {
         .map_err(|err| Error::new("no graphics adapter supports this surface", err))?;
 
         let device = open_device(&adapter)?;
-        let surface = Surface::new(surface, &adapter, device.clone(), width, height, hdr);
+        let surface = Surface::new(surface, &adapter, device.clone(), width, height, hdr, vsync);
 
         Ok((device, surface))
     }

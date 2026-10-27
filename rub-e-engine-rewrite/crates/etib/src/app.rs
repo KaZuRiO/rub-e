@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result};
-use etib_core::{Acquired, Encoder, Hdr, Instance, TextureView};
+use etib_core::{Acquired, Encoder, Hdr, Instance, TextureView, Vsync};
 use log::{debug, error, info, trace};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::gpu::Gpu;
 
@@ -27,6 +27,13 @@ pub struct Config {
     /// application has to respect: on an extended-range surface, 1.0 means SDR
     /// white rather than the brightest thing the display can show.
     pub hdr: Hdr,
+    /// Open borderless fullscreen on the current monitor, as the engine always
+    /// did, rather than as a window of [`size`](Self::size).
+    pub fullscreen: bool,
+    /// Whether presentation waits for the display's refresh: the engine's
+    /// `vsync` setting. Reading it from a settings file is the application's
+    /// business.
+    pub vsync: Vsync,
 }
 
 impl Default for Config {
@@ -36,6 +43,8 @@ impl Default for Config {
             size: (1280, 800),
             exit_on_escape: true,
             hdr: Hdr::Allow,
+            fullscreen: false,
+            vsync: Vsync::On,
         }
     }
 }
@@ -233,7 +242,12 @@ where
             .with_inner_size(winit::dpi::LogicalSize::new(
                 self.config.size.0,
                 self.config.size.1,
-            ));
+            ))
+            .with_fullscreen(
+                self.config
+                    .fullscreen
+                    .then_some(Fullscreen::Borderless(None)),
+            );
 
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -244,7 +258,12 @@ where
             }
         };
 
-        let gpu = match Gpu::new(&self.instance, window.clone(), self.config.hdr) {
+        let gpu = match Gpu::new(
+            &self.instance,
+            window.clone(),
+            self.config.hdr,
+            self.config.vsync,
+        ) {
             Ok(gpu) => gpu,
             Err(err) => {
                 error!("graphics initialisation failed: {err:#}");

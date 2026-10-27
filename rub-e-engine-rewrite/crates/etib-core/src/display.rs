@@ -55,6 +55,23 @@ pub enum Hdr {
     Off,
 }
 
+/// Whether presentation waits for the display's refresh.
+///
+/// The surface log line reports the mode that was actually configured.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Vsync {
+    /// One image per refresh, never torn. Always available, and what the
+    /// engine's `vsync: true` meant; the frame rate is capped at the refresh
+    /// rate.
+    #[default]
+    On,
+    /// As many images as the GPU can render: the newest finished image is
+    /// shown at each refresh where the platform can do that without tearing,
+    /// otherwise images are shown as soon as they are ready and may tear.
+    /// Falls back to [`On`](Self::On) where neither is offered.
+    Off,
+}
+
 /// What the platform reports about the display a surface is presenting to.
 ///
 /// Every field is optional because every platform reports a different subset,

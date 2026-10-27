@@ -3,7 +3,7 @@
 use log::{debug, error, info, trace, warn};
 
 use crate::device::Device;
-use crate::display::{ColorSpace, Display, Hdr, Output};
+use crate::display::{ColorSpace, Display, Hdr, Output, Vsync};
 use crate::texture::{TextureFormat, TextureView};
 
 /// What came back from [`Surface::acquire`].
@@ -59,6 +59,7 @@ impl Surface {
         width: u32,
         height: u32,
         hdr: Hdr,
+        vsync: Vsync,
     ) -> Self {
         let caps = inner.get_capabilities(adapter);
         debug!(
@@ -74,11 +75,7 @@ impl Surface {
 
         let (format, color_space) = select_output(&caps, hdr, &display);
 
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        let present_mode = select_present_mode(&caps.present_modes, vsync);
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -265,4 +262,48 @@ fn select_output(
         });
 
     (format, ColorSpace::Srgb)
+}
+
+/// The presentation mode for `vsync` among those the surface offers.
+fn select_present_mode(available: &[wgpu::PresentMode], vsync: Vsync) -> wgpu::PresentMode {
+    use wgpu::PresentMode::{Fifo, Immediate, Mailbox};
+    match vsync {
+        // Every surface supports Fifo.
+        Vsync::On => Fifo,
+        Vsync::Off => [Mailbox, Immediate]
+            .into_iter()
+            .find(|mode| available.contains(mode))
+            .unwrap_or(Fifo),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wgpu::PresentMode::{Fifo, Immediate, Mailbox};
+
+    #[test]
+    fn vsync_on_is_fifo() {
+        assert_eq!(
+            select_present_mode(&[Mailbox, Immediate, Fifo], Vsync::On),
+            Fifo
+        );
+    }
+
+    #[test]
+    fn vsync_off_prefers_mailbox_then_immediate() {
+        assert_eq!(
+            select_present_mode(&[Fifo, Immediate, Mailbox], Vsync::Off),
+            Mailbox
+        );
+        assert_eq!(
+            select_present_mode(&[Fifo, Immediate], Vsync::Off),
+            Immediate
+        );
+    }
+
+    #[test]
+    fn vsync_off_falls_back_to_fifo() {
+        assert_eq!(select_present_mode(&[Fifo], Vsync::Off), Fifo);
+    }
 }
