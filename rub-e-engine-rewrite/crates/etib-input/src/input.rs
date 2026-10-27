@@ -4,6 +4,8 @@ use glam::Vec2;
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+#[cfg(feature = "gamepad")]
+use crate::gamepad::Gamepads;
 use crate::held::Held;
 
 /// How many pixels of a touchpad's scroll make one line of a wheel's.
@@ -33,6 +35,8 @@ pub struct Input {
     mouse_delta: Vec2,
     scroll: f32,
     cursor: Option<Vec2>,
+    #[cfg(feature = "gamepad")]
+    gamepads: Gamepads,
 }
 
 impl Input {
@@ -108,13 +112,24 @@ impl Input {
         self.cursor
     }
 
+    /// The connected gamepads.
+    #[cfg(feature = "gamepad")]
+    pub fn gamepads(&self) -> &Gamepads {
+        &self.gamepads
+    }
+
     /// Forgets what happened this frame, keeping what is held: the engine's
     /// `clear_frame_state`. Call it last in `App::update`.
+    ///
+    /// With the `gamepad` feature, this is also where gamepad events are
+    /// collected, ready for the next frame.
     pub fn clear_frame_state(&mut self) {
         self.keys.clear_frame_state();
         self.buttons.clear_frame_state();
         self.mouse_delta = Vec2::ZERO;
         self.scroll = 0.0;
+        #[cfg(feature = "gamepad")]
+        self.gamepads.clear_frame_state();
     }
 
     fn key(&mut self, key: PhysicalKey, state: ElementState) {

@@ -4,7 +4,21 @@ version.workspace = true
 edition.workspace = true
 description = "Keyboard, mouse and gamepad state for etib applications, fed from winit events"
 
+[features]
+# Gamepads, through gilrs. Off, nothing gamepad-related is compiled or linked;
+# on Linux it needs libudev.
+gamepad = ["dep:gilrs"]
+
 [dependencies]
+gilrs = { workspace = true, optional = true }
 glam = { workspace = true }
 log = { workspace = true }
 winit = { workspace = true }
+
+[dev-dependencies]
+# Used by the example only; a library has no business installing a logger.
+env_logger = { workspace = true }
+
+[[example]]
+name = "gamepads"
+required-features = ["gamepad"]

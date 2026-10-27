@@ -34,6 +34,7 @@ egui = "0.36.2"
 egui-wgpu = "0.36.2"
 egui-winit = "0.36.2"
 env_logger = "0.11.11"
+gilrs = "0.11.1"
 glam = "0.32.1"
 # Only the Radiance .hdr decoder, for skyboxes.
 image = { version = "0.25.9", default-features = false, features = ["hdr"] }

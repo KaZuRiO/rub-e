@@ -34,9 +34,15 @@
 //! The crate knows winit and nothing else of etib: it draws nothing and needs
 //! no device.
 
+#[cfg(feature = "gamepad")]
+mod gamepad;
 mod held;
 mod input;
 
+#[cfg(feature = "gamepad")]
+pub use gamepad::{DEADZONE, Gamepad, Gamepads};
+#[cfg(feature = "gamepad")]
+pub use gilrs::{Axis, Button};
 pub use glam::Vec2;
 pub use input::Input;
 pub use winit::event::MouseButton;
