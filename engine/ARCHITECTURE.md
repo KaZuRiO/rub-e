@@ -98,9 +98,11 @@ etib::run(Config, build)                        crates/etib/src/app.rs
        └─ build(&gpu) -> App          your pipelines are created here
 ```
 
-`resumed` can fire again if the platform tears the window down and brings it
-back, which is why `build` is `FnMut` and why everything above it is rebuilt
-rather than reused.
+`build` runs once, when the window is created. A later `resumed` keeps the
+window, the device and the application it built; nothing handles `suspended`,
+which only matters on platforms that destroy the window while the program
+lives. If any step fails, the loop exits and `run` returns that error with
+what was being attempted as its context, so `main` exits non-zero.
 
 Two deliberate choices in there:
 
@@ -154,7 +156,8 @@ settings; reading such a file is the application's business.
 
 ```text
   dt = now - last_frame                     fps is an EMA (0.9 old / 0.1 new);
-  app.update(dt)                            a raw 1/dt reads as noise
+  app.update(min(dt, MAX_DT))               a raw 1/dt reads as noise; MAX_DT
+  app.exit_requested()? -> exit             is 0.1 s, so a stall is not a leap
   │
   surface.acquire() ──► Acquired::Frame  draw into it
                         Acquired::Skip   occluded, timed out, or the swapchain
@@ -171,6 +174,11 @@ settings; reading such a file is the application's business.
 
 `ControlFlow::Poll` is set in `about_to_wait`: this animates continuously rather
 than only on input.
+
+An application ends the loop by returning `true` from `App::exit_requested`,
+which the runner asks after every `update` and every window event. The
+application is then dropped normally, so whatever it owns — its sound device,
+its connections — is closed on the way out.
 
 Recoverable swapchain states are handled inside `Surface::acquire` — it
 reconfigures itself where that is the fix, so an application only ever chooses
@@ -804,8 +812,8 @@ Sound is not part of that: an application that makes a noise builds an `Audio`
 in `MyApp::new` and keeps it in `MyApp`, and plays from `update`, from
 `window_event`, or from anywhere else it likes.
 
-`build` is `FnMut` because the platform may tear the window down and resume it,
-so anything expensive it captures should be cheap to clone or rebuild.
+`build` is called once, when the window exists. To stop, return `true` from
+`App::exit_requested`; an error from `build` comes back out of `etib::run`.
 
 The two examples are the reference:
 

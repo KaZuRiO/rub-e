@@ -107,7 +107,7 @@ mod gpu;
 mod lut;
 mod post;
 
-pub use app::{App, Config, Frame, FrameStats, run};
+pub use app::{App, Config, Frame, FrameStats, MAX_DT, run};
 pub use blit::Blit;
 pub use gpu::Gpu;
 pub use lut::Lut;

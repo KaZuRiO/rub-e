@@ -165,7 +165,7 @@ pub fn build_panel(ui: &mut egui::Ui, state: &mut UiState, stats: &FrameStats) {
                 ui.end_row();
 
                 ui.label("backend");
-                ui.label(&stats.backend);
+                ui.label(stats.backend);
                 ui.end_row();
             });
         });

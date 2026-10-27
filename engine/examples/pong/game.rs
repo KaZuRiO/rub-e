@@ -108,6 +108,8 @@ pub struct PongApp {
     /// Seconds since the display was last asked what it can show.
     since_display_poll: f32,
     sounds: PongSounds,
+    /// Set by the menu's Quit; the runner asks for it after every update.
+    quit_requested: bool,
 }
 
 impl PongApp {
@@ -221,6 +223,7 @@ impl PongApp {
             time: 0.0,
             since_display_poll: 0.0,
             sounds: PongSounds::new(),
+            quit_requested: false,
         })
     }
 
@@ -506,9 +509,9 @@ impl PongApp {
                 }
                 reset_ball(&mut self.ball, true);
             }
-            // As the engine did: there is nothing to save, and the runner has
-            // no way for an application to ask it to stop.
-            UiAction::Quit => std::process::exit(0),
+            // Through the runner rather than `process::exit`, so the sound
+            // device and the connection are closed on the way out.
+            UiAction::Quit => self.quit_requested = true,
         }
     }
 }
@@ -554,6 +557,10 @@ fn add_spectators(scene: &mut Scene, seats: &[Vec3]) -> Vec<Spectator> {
 }
 
 impl App for PongApp {
+    fn exit_requested(&self) -> bool {
+        self.quit_requested
+    }
+
     fn window_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
         self.input.window_event(event);
         self.egui.on_window_event(window, event)
