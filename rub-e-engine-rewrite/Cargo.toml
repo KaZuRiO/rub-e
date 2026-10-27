@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/etib-core", "crates/etib-ui", "crates/etib-audio", "crates/etib"]
+# So `cargo run --example triangle` works from the workspace root.
+default-members = ["crates/etib"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+etib-core = { path = "crates/etib-core" }
+etib-ui = { path = "crates/etib-ui" }
+# Its own default features are opted into by `etib`'s `clap` feature, so that
+# an application that wants no plugin loader does not link one.
+etib-audio = { path = "crates/etib-audio", default-features = false }
+
+anyhow = "1.0.104"
+bytemuck = "1.25.2"
+clack-extensions = "0.2.0"
+clack-host = "0.2.0"
+clack-plugin = "0.2.0"
+cpal = "0.18.2"
+egui = "0.36.2"
+egui-wgpu = "0.36.2"
+egui-winit = "0.36.2"
+env_logger = "0.11.11"
+log = "0.4.34"
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+pollster = "1.0.1"
+raw-window-handle = "0.6.2"
+wgpu = "30.0.1"
+winit = "0.30.13"

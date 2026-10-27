@@ -1,0 +1,320 @@
+//! Window lifecycle, event routing and the frame loop.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::{Context as _, Result};
+use etib_core::{Acquired, Encoder, Hdr, Instance, TextureView};
+use log::{debug, error, info, trace};
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::window::{Window, WindowId};
+
+use crate::gpu::Gpu;
+
+/// How the window is created. Everything else about the application lives in
+/// the [`App`] implementation.
+pub struct Config {
+    pub title: String,
+    /// Initial inner size, in logical pixels.
+    pub size: (u32, u32),
+    /// Exit when Escape is pressed and the [`App`] did not consume the key.
+    pub exit_on_escape: bool,
+    /// Whether to ask for an extended-range (HDR) surface.
+    ///
+    /// What was actually configured is [`Gpu::color_space`], which an
+    /// application has to respect: on an extended-range surface, 1.0 means SDR
+    /// white rather than the brightest thing the display can show.
+    pub hdr: Hdr,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            title: "etib".to_owned(),
+            size: (1280, 800),
+            exit_on_escape: true,
+            hdr: Hdr::Allow,
+        }
+    }
+}
+
+/// Everything the runner hands to [`App::render`] for one frame.
+pub struct Frame<'a> {
+    pub gpu: &'a Gpu,
+    /// The frame's encoder. The runner submits it once `render` returns.
+    pub encoder: &'a mut Encoder,
+    /// View of the swapchain image this frame draws into.
+    pub view: &'a TextureView,
+    pub stats: FrameStats,
+}
+
+/// Read-only measurements of the frame in flight, useful for an overlay.
+#[derive(Clone, Debug)]
+pub struct FrameStats {
+    /// Smoothed frame rate; a raw `1 / dt` reads as noise.
+    pub fps: f32,
+    pub frame_index: u64,
+    pub surface_size: (u32, u32),
+    /// The graphics backend in use, formatted for display.
+    pub backend: String,
+}
+
+/// The application behind the frame loop.
+///
+/// The runner owns the window, the surface and the frame pacing; an
+/// implementation owns its pipelines and its state.
+pub trait App {
+    /// Offered every window event before the runner acts on it. Return `true`
+    /// when the event was consumed, e.g. because egui used it, which suppresses
+    /// the runner's own key handling for that event.
+    fn window_event(&mut self, _window: &Window, _event: &WindowEvent) -> bool {
+        false
+    }
+
+    /// The surface has been reconfigured to a new, non-degenerate size.
+    fn resize(&mut self, _gpu: &Gpu, _width: u32, _height: u32) {}
+
+    /// Advances state by `dt` seconds, before the frame is recorded.
+    fn update(&mut self, _dt: f32) {}
+
+    /// Records this frame's GPU work into `frame.encoder`.
+    fn render(&mut self, frame: Frame<'_>);
+}
+
+/// Opens a window and runs the frame loop until the application exits.
+///
+/// `build` is called once the device and surface exist, and again if the
+/// platform tears the window down and resumes it later.
+pub fn run<A, F>(config: Config, build: F) -> Result<()>
+where
+    A: App,
+    F: FnMut(&Gpu) -> Result<A>,
+{
+    let event_loop = EventLoop::new().context("failed to create the winit event loop")?;
+
+    // The graphics backend wants the platform display connection up front.
+    // winit's owned handle is the right thing to hand it, and it outlives the
+    // event loop.
+    let instance = Instance::new(event_loop.owned_display_handle());
+
+    let mut runner = Runner {
+        instance,
+        config,
+        build,
+        state: None,
+        last_frame: Instant::now(),
+        frame_index: 0,
+        fps: 0.0,
+        last_fps_log: Instant::now(),
+    };
+
+    event_loop
+        .run_app(&mut runner)
+        .context("the event loop exited with an error")?;
+
+    info!("clean shutdown");
+    Ok(())
+}
+
+/// Everything that only exists once a window has been created. On some
+/// platforms that happens after startup, hence the Option in Runner.
+struct State<A> {
+    gpu: Gpu,
+    app: A,
+}
+
+struct Runner<A, F> {
+    instance: Instance,
+    config: Config,
+    build: F,
+    state: Option<State<A>>,
+    last_frame: Instant,
+    frame_index: u64,
+    fps: f32,
+    last_fps_log: Instant,
+}
+
+impl<A, F> Runner<A, F>
+where
+    A: App,
+    F: FnMut(&Gpu) -> Result<A>,
+{
+    /// Runs one frame: acquire, let the app record its passes, submit, present.
+    fn render(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f32();
+        self.last_frame = now;
+
+        // Exponential moving average; dt can spike badly on the first frame or
+        // after the window has been dragged.
+        if dt > 0.0 {
+            let instant_fps = 1.0 / dt;
+            self.fps = if self.fps == 0.0 {
+                instant_fps
+            } else {
+                self.fps * 0.9 + instant_fps * 0.1
+            };
+        }
+
+        state.app.update(dt);
+
+        self.frame_index += 1;
+        if now.duration_since(self.last_fps_log).as_secs_f32() >= 1.0 {
+            info!("frame {} | {:.1} fps", self.frame_index, self.fps);
+            self.last_fps_log = now;
+        }
+        trace!("frame {} begin (dt {:.2} ms)", self.frame_index, dt * 1000.0);
+
+        let frame = match state.gpu.surface.acquire() {
+            Acquired::Frame(frame) => frame,
+            // The surface has already recovered as far as it can; try again.
+            Acquired::Skip => {
+                state.gpu.window.request_redraw();
+                return;
+            }
+            Acquired::Fatal => {
+                error!("the surface is unusable; shutting down");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        let stats = FrameStats {
+            fps: self.fps,
+            frame_index: self.frame_index,
+            surface_size: state.gpu.size(),
+            backend: state.gpu.device.backend().to_owned(),
+        };
+
+        let mut encoder = state.gpu.device.encoder("frame encoder");
+        state.app.render(Frame {
+            gpu: &state.gpu,
+            encoder: &mut encoder,
+            view: frame.view(),
+            stats,
+        });
+
+        state.gpu.device.submit(encoder);
+        frame.present(&state.gpu.device);
+        trace!("frame {} presented", self.frame_index);
+
+        // Animation is continuous, so keep asking for the next frame.
+        state.gpu.window.request_redraw();
+    }
+}
+
+impl<A, F> ApplicationHandler for Runner<A, F>
+where
+    A: App,
+    F: FnMut(&Gpu) -> Result<A>,
+{
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.is_some() {
+            debug!("resumed with an existing renderer; nothing to rebuild");
+            return;
+        }
+
+        info!("creating window");
+        let attributes = Window::default_attributes()
+            .with_title(self.config.title.clone())
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                self.config.size.0,
+                self.config.size.1,
+            ));
+
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(err) => {
+                error!("failed to create the window: {err}");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        let gpu = match Gpu::new(&self.instance, window.clone(), self.config.hdr) {
+            Ok(gpu) => gpu,
+            Err(err) => {
+                error!("graphics initialisation failed: {err:#}");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        let app = match (self.build)(&gpu) {
+            Ok(app) => app,
+            Err(err) => {
+                error!("application setup failed: {err:#}");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        self.state = Some(State { gpu, app });
+
+        self.last_frame = Instant::now();
+        self.last_fps_log = Instant::now();
+        info!("pipeline ready; entering the frame loop");
+        window.request_redraw();
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+
+        // The app gets first refusal on every event, so its UI can capture
+        // clicks and keystrokes before the runner reacts to them.
+        let window = state.gpu.window.clone();
+        let consumed = state.app.window_event(&window, &event);
+
+        match event {
+            WindowEvent::CloseRequested => {
+                info!("close requested; shutting down");
+                event_loop.exit();
+            }
+            WindowEvent::Resized(size) => {
+                if state.gpu.surface.resize(size.width, size.height) {
+                    state.app.resize(&state.gpu, size.width, size.height);
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                info!("scale factor changed to {scale_factor:.2}");
+            }
+            WindowEvent::RedrawRequested => {
+                self.render(event_loop);
+            }
+            WindowEvent::KeyboardInput { event, .. } if !consumed && self.config.exit_on_escape => {
+                use winit::keyboard::{Key, NamedKey};
+                if event.state.is_pressed() && event.logical_key == Key::Named(NamedKey::Escape) {
+                    info!("escape pressed; shutting down");
+                    event_loop.exit();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Animate continuously rather than only on input.
+        event_loop.set_control_flow(ControlFlow::Poll);
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        info!(
+            "event loop exiting after {} frames; releasing GPU resources",
+            self.frame_index
+        );
+        self.state = None;
+    }
+}

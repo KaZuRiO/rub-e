@@ -1,0 +1,42 @@
+[package]
+name = "etib"
+version.workspace = true
+edition.workspace = true
+description = "A small application framework for compute-shader driven windows, built on etib-core"
+
+[features]
+default = ["ui", "audio", "clap"]
+# egui panels. Off, nothing egui-related is compiled or linked; the frame loop
+# and every other part of the framework work exactly the same without it.
+ui = ["dep:etib-ui"]
+# Sound. Off, no audio backend is compiled, linked or opened — which is also
+# what to do on a platform whose audio libraries are not there to link against.
+audio = ["dep:etib-audio"]
+# Playing CLAP instruments, which implies `audio`. Off, no plugin loader is
+# compiled or linked, and sound playback is unaffected.
+clap = ["audio", "etib-audio?/clap"]
+
+[dependencies]
+anyhow = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+etib-audio = { workspace = true, optional = true }
+etib-core = { workspace = true }
+etib-ui = { workspace = true, optional = true }
+log = { workspace = true }
+winit = { workspace = true }
+
+[dev-dependencies]
+# Used by the examples only; a library has no business installing a logger.
+env_logger = { workspace = true }
+
+[[example]]
+name = "triangle"
+path = "examples/triangle/main.rs"
+# The example paints a control panel, so it is skipped in a UI-free build.
+required-features = ["ui"]
+
+[[example]]
+name = "chart"
+path = "examples/chart/main.rs"
+# Draws its own control panel, like the triangle.
+required-features = ["ui"]

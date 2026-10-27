@@ -1,0 +1,82 @@
+[package]
+name = "etib-audio"
+version.workspace = true
+edition.workspace = true
+description = "Sound playback for etib: a mixer over the system's default output device"
+
+[features]
+default = ["clap"]
+# Hosting CLAP instruments. Off, no plugin loader is compiled or linked, and
+# `Sound` playback is unaffected.
+clap = [
+    "dep:clack-host",
+    "dep:clack-extensions",
+    "dep:raw-window-handle",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+]
+
+[dependencies]
+clack-extensions = { workspace = true, optional = true, features = [
+    "clack-host",
+    "audio-ports",
+    "gui",
+    "log",
+    "note-ports",
+    "params",
+    "raw-window-handle_06",
+    "thread-check",
+    "timer",
+] }
+clack-host = { workspace = true, optional = true }
+cpal = { workspace = true }
+log = { workspace = true }
+# The type a caller hands over to have a plugin's editor put in their own
+# window. The same version winit uses, so one can be passed straight in.
+raw-window-handle = { workspace = true, optional = true }
+
+# For the debug window this crate opens when a plugin will only embed its
+# editor. Only that: nothing else here touches the platform's windowing.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true, optional = true }
+objc2-app-kit = { workspace = true, optional = true, features = [
+    "NSApplication",
+    "NSGraphics",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { workspace = true, optional = true, features = ["NSGeometry"] }
+
+[dev-dependencies]
+# The test instrument in `examples/` is a CLAP plugin, built so that the host
+# has something to load that nobody has to buy first.
+clack-extensions = { workspace = true, features = ["clack-plugin"] }
+clack-plugin = { workspace = true }
+# Used by the examples only; a library has no business installing a logger.
+env_logger = { workspace = true }
+
+# The instrument example stands in for an application's event loop, which is
+# what draws a plugin's editor. Only the example needs this.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSEvent", "NSResponder"] }
+objc2-foundation = { workspace = true, features = ["NSDate", "NSRunLoop"] }
+
+[[example]]
+name = "beep"
+path = "examples/beep.rs"
+
+[[example]]
+name = "instrument"
+path = "examples/instrument.rs"
+required-features = ["clap"]
+
+# A CLAP plugin rather than a program: cargo leaves a loadable library in
+# target/<profile>/examples for the host example to open.
+[[example]]
+name = "test_instrument"
+path = "examples/test_instrument.rs"
+crate-type = ["cdylib"]
+required-features = ["clap"]
