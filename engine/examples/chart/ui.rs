@@ -101,9 +101,11 @@ pub fn build_panel(root: &mut egui::Ui, state: &mut UiState, stats: &FrameStats)
         .show(root, |ui| {
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new("The chart is drawn scene-referred; everything you see is the curve")
-                    .small()
-                    .weak(),
+                egui::RichText::new(
+                    "The chart is drawn scene-referred; everything you see is the curve",
+                )
+                .small()
+                .weak(),
             );
             ui.separator();
 
@@ -133,7 +135,7 @@ pub fn build_panel(root: &mut egui::Ui, state: &mut UiState, stats: &FrameStats)
                 ui.end_row();
 
                 ui.label("backend");
-                ui.label(&stats.backend);
+                ui.label(stats.backend);
                 ui.end_row();
             });
         });
@@ -171,7 +173,9 @@ fn build_curve(ui: &mut egui::Ui, state: &mut UiState) {
             .suffix(" EV")
             .fixed_decimals(2),
     )
-    .on_hover_text("Slides the whole chart along the curve, which is the quickest way to see its shape.");
+    .on_hover_text(
+        "Slides the whole chart along the curve, which is the quickest way to see its shape.",
+    );
     ui.add(
         egui::Slider::new(&mut grade.contrast, 0.5..=2.0)
             .text("contrast")

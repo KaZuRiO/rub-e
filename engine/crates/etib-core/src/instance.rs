@@ -64,15 +64,16 @@ impl Instance {
 
         // Device creation is async but resolves immediately on native backends,
         // so blocking here costs nothing and keeps callers synchronous.
-        let adapter = pollster::block_on(self.inner.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: Some(&surface),
-            // Exact adapter limits: this is a trusted native app, not a sandbox
-            // that needs fingerprinting resistance.
-            apply_limit_buckets: false,
-        }))
-        .map_err(|err| Error::new("no graphics adapter supports this surface", err))?;
+        let adapter =
+            pollster::block_on(self.inner.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: Some(&surface),
+                // Exact adapter limits: this is a trusted native app, not a sandbox
+                // that needs fingerprinting resistance.
+                apply_limit_buckets: false,
+            }))
+            .map_err(|err| Error::new("no graphics adapter supports this surface", err))?;
 
         let device = open_device(&adapter)?;
         let surface = Surface::new(surface, &adapter, device.clone(), width, height, hdr, vsync);

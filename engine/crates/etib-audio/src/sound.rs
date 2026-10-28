@@ -164,7 +164,13 @@ impl Sound {
         };
 
         let rate = Self::TONE_RATE as f32;
+        // Both are finite, non-negative and bounded by MAX_TONE_SECONDS.
+        #[expect(clippy::cast_possible_truncation, reason = "bounded just above")]
         let frames = ((seconds * rate) as usize).max(1);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a constant few milliseconds"
+        )]
         let fade = (Self::TONE_FADE * rate) as usize;
 
         // A phase step per frame, kept in the cycle so that precision does not

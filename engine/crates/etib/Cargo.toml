@@ -2,6 +2,7 @@
 name = "etib"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "A small application framework for compute-shader driven windows, built on etib-core"
 
 [features]
@@ -24,3 +25,6 @@ etib-core = { workspace = true }
 etib-ui = { workspace = true, optional = true }
 log = { workspace = true }
 winit = { workspace = true }
+
+[lints]
+workspace = true

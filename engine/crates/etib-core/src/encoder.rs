@@ -14,13 +14,18 @@ use crate::texture::{DepthTexture, TextureView};
 /// A colour in linear space, 0..1 per channel.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Color {
+    /// Red.
     pub r: f64,
+    /// Green.
     pub g: f64,
+    /// Blue.
     pub b: f64,
+    /// Alpha: 1.0 is opaque.
     pub a: f64,
 }
 
 impl Color {
+    /// Opaque black, what a scene is usually cleared to.
     pub const BLACK: Self = Self {
         r: 0.0,
         g: 0.0,
@@ -74,12 +79,10 @@ impl Encoder {
 
     /// Opens a compute pass. Drop it to end the pass.
     pub fn compute_pass(&mut self, label: &str) -> ComputePass<'_> {
-        let pass = self
-            .inner
-            .begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(label),
-                timestamp_writes: None,
-            });
+        let pass = self.inner.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(label),
+            timestamp_writes: None,
+        });
         ComputePass {
             inner: pass.forget_lifetime(),
             _encoder: PhantomData,
@@ -222,7 +225,11 @@ impl ComputePass<'_> {
         self.dispatch(
             pipeline,
             bindings,
-            (width.div_ceil(group_width), height.div_ceil(group_height), 1),
+            (
+                width.div_ceil(group_width),
+                height.div_ceil(group_height),
+                1,
+            ),
         );
     }
 
@@ -241,12 +248,7 @@ pub struct RenderPass<'a> {
 impl RenderPass<'_> {
     /// Draws `vertices` vertices with `pipeline`. With a vertexless pipeline
     /// such as [`RenderPipeline::screen`], `0..3` is a fullscreen triangle.
-    pub fn draw(
-        &mut self,
-        pipeline: &RenderPipeline,
-        bindings: &BindGroup,
-        vertices: Range<u32>,
-    ) {
+    pub fn draw(&mut self, pipeline: &RenderPipeline, bindings: &BindGroup, vertices: Range<u32>) {
         self.inner.set_pipeline(pipeline.raw());
         self.inner.set_bind_group(0, bindings.raw(), &[]);
         self.inner.draw(vertices, 0..1);
@@ -269,6 +271,7 @@ impl RenderPass<'_> {
             .set_vertex_buffer(slot, buffer.vertex_buffer().slice(..));
     }
 
+    /// Reads the indices of the draws that follow from `buffer`.
     pub fn set_index_buffer(&mut self, buffer: &IndexBuffer) {
         self.inner
             .set_index_buffer(buffer.raw().slice(..), buffer.format().raw());

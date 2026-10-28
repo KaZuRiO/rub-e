@@ -19,7 +19,7 @@ use etib::winit::window::Window;
 use etib::{App, Frame, Gpu, Grade, Output, PostProcess};
 use etib_input::Input;
 use etib_physics::{RigidBody, apply_cube_collision};
-use etib_scene::{Camera, DynamicModel, ModelCube, Projection, Scene};
+use etib_scene::{Camera, DynamicId, DynamicModel, ModelCube, Projection, Scene};
 use glam::{Mat4, Quat, Vec3};
 
 use fly::FlyCamera;
@@ -117,7 +117,7 @@ fn make_cube_model(r: f32, g: f32, b: f32) -> DynamicModel {
 }
 
 struct Cube {
-    id: usize,
+    id: DynamicId,
     body: RigidBody,
 }
 
@@ -160,7 +160,9 @@ impl PhysicsDemo {
         let cubes = COLORS
             .iter()
             .map(|&(r, g, b)| Cube {
-                id: scene.add_dynamic(make_cube_model(r, g, b)),
+                id: scene
+                    .add_dynamic(make_cube_model(r, g, b))
+                    .expect("the scene has room for every cube"),
                 body: RigidBody::new()
                     .with_restitution(0.85) // bouncy — preserves most impact energy
                     .with_friction(1.0)
@@ -284,7 +286,8 @@ impl PhysicsDemo {
         let n = self.cubes.len();
         for i in 0..n {
             for j in (i + 1)..n {
-                let min_dist = (self.cubes[i].body.half_side + self.cubes[j].body.half_side) * 1.2;
+                let min_dist =
+                    (self.cubes[i].body.half_side() + self.cubes[j].body.half_side()) * 1.2;
                 if (positions[i] - positions[j]).length_squared() >= min_dist * min_dist {
                     continue;
                 }

@@ -20,6 +20,7 @@ pub struct SoundManager {
 }
 
 impl SoundManager {
+    /// A manager with no groups, playing through `audio`.
     pub fn new(audio: Audio) -> Self {
         Self {
             audio,

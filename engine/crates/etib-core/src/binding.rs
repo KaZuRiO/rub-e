@@ -14,8 +14,11 @@ use crate::texture::{Sampler, StorageFormat, TextureView};
 /// Which shader stage a binding is visible to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
+    /// Compute shaders only.
     Compute,
+    /// Vertex shaders only.
     Vertex,
+    /// Fragment shaders only.
     Fragment,
     /// Every stage: for a resource such as a camera that a compute pass, a
     /// vertex shader and a fragment shader all read, so that one layout and
@@ -42,14 +45,17 @@ impl Stage {
 /// agree with the WGSL: `var<storage, read>` or `var<storage, read_write>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
+    /// `var<storage, read>`: the shader only reads it.
     Read,
+    /// `var<storage, read_write>`: the shader may write it too.
     ReadWrite,
 }
 
 /// The shape of a bind group: what it holds, in what order, and who can see it.
 pub struct BindLayout {
     inner: wgpu::BindGroupLayout,
-    entries: usize,
+    /// What each binding holds, in binding order.
+    kinds: Vec<Kind>,
 }
 
 impl BindLayout {
@@ -60,6 +66,7 @@ impl BindLayout {
             device,
             label: label.to_owned(),
             entries: Vec::new(),
+            kinds: Vec::new(),
         }
     }
 
@@ -67,34 +74,28 @@ impl BindLayout {
     ///
     /// # Panics
     ///
-    /// If the number of resources does not match the layout.
+    /// If the number of resources does not match the layout, or one of them is
+    /// a different kind of resource from the one its binding declares.
     pub fn group(&self, device: &Device, label: &str, bindings: &[&dyn Bindable]) -> BindGroup {
-        assert_eq!(
-            bindings.len(),
-            self.entries,
-            "bind group '{label}' has {} resources but its layout declares {}",
-            bindings.len(),
-            self.entries
-        );
+        let given: Vec<Kind> = bindings.iter().map(|binding| binding.kind()).collect();
+        check_kinds(label, &self.kinds, &given);
 
         let entries: Vec<_> = bindings
             .iter()
             .enumerate()
             .map(|(index, binding)| wgpu::BindGroupEntry {
-                binding: index as u32,
+                binding: u32::try_from(index).expect("fewer than u32::MAX bindings"),
                 resource: binding.resource(),
             })
             .collect();
 
-        BindGroup(
-            device
-                .raw()
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &self.inner,
-                    entries: &entries,
-                }),
-        )
+        BindGroup(device.checked("bind group", label, |raw| {
+            raw.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &self.inner,
+                entries: &entries,
+            })
+        }))
     }
 
     pub(crate) fn raw(&self) -> &wgpu::BindGroupLayout {
@@ -107,6 +108,7 @@ pub struct BindLayoutBuilder<'a> {
     device: &'a Device,
     label: String,
     entries: Vec<wgpu::BindGroupLayoutEntry>,
+    kinds: Vec<Kind>,
 }
 
 impl BindLayoutBuilder<'_> {
@@ -216,6 +218,7 @@ impl BindLayoutBuilder<'_> {
         self
     }
 
+    /// Creates the layout from the bindings declared so far, in order.
     pub fn finish(self) -> BindLayout {
         debug!(
             "creating bind group layout '{}' with {} binding(s)",
@@ -224,14 +227,15 @@ impl BindLayoutBuilder<'_> {
         );
         let inner = self
             .device
-            .raw()
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some(&self.label),
-                entries: &self.entries,
+            .checked("bind group layout", &self.label, |raw| {
+                raw.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some(&self.label),
+                    entries: &self.entries,
+                })
             });
         BindLayout {
             inner,
-            entries: self.entries.len(),
+            kinds: self.kinds,
         }
     }
 
@@ -249,8 +253,17 @@ impl BindLayoutBuilder<'_> {
     }
 
     fn push(&mut self, stage: Stage, ty: wgpu::BindingType) {
+        self.kinds.push(match ty {
+            wgpu::BindingType::Sampler(_) => Kind::Sampler,
+            wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                ..
+            } => Kind::Uniform,
+            wgpu::BindingType::Buffer { .. } => Kind::Storage,
+            _ => Kind::View,
+        });
         self.entries.push(wgpu::BindGroupLayoutEntry {
-            binding: self.entries.len() as u32,
+            binding: u32::try_from(self.entries.len()).expect("fewer than u32::MAX bindings"),
             visibility: stage.raw(),
             ty,
             count: None,
@@ -275,11 +288,18 @@ impl BindGroup {
 pub trait Bindable: sealed::Sealed {
     #[doc(hidden)]
     fn resource(&self) -> wgpu::BindingResource<'_>;
+
+    #[doc(hidden)]
+    fn kind(&self) -> Kind;
 }
 
 impl Bindable for TextureView {
     fn resource(&self) -> wgpu::BindingResource<'_> {
         wgpu::BindingResource::TextureView(self.raw())
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::View
     }
 }
 
@@ -287,11 +307,19 @@ impl Bindable for Sampler {
     fn resource(&self) -> wgpu::BindingResource<'_> {
         wgpu::BindingResource::Sampler(self.raw())
     }
+
+    fn kind(&self) -> Kind {
+        Kind::Sampler
+    }
 }
 
 impl<T: Pod> Bindable for UniformBuffer<T> {
     fn resource(&self) -> wgpu::BindingResource<'_> {
         self.raw().as_entire_binding()
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Uniform
     }
 }
 
@@ -299,15 +327,49 @@ impl<T: Pod> Bindable for StorageBuffer<T> {
     fn resource(&self) -> wgpu::BindingResource<'_> {
         self.raw().as_entire_binding()
     }
+
+    fn kind(&self) -> Kind {
+        Kind::Storage
+    }
 }
 
 impl Bindable for IndirectBuffer {
     fn resource(&self) -> wgpu::BindingResource<'_> {
         self.raw().as_entire_binding()
     }
+
+    fn kind(&self) -> Kind {
+        Kind::Storage
+    }
 }
 
+/// Refuses a bind group whose resources do not match its layout: first in
+/// number, then kind by kind, naming the first slot that differs.
+fn check_kinds(label: &str, declared: &[Kind], given: &[Kind]) {
+    assert_eq!(
+        given.len(),
+        declared.len(),
+        "bind group '{label}' has {} resources but its layout declares {}",
+        given.len(),
+        declared.len()
+    );
+    if let Some((index, (declared, given))) = declared
+        .iter()
+        .zip(given)
+        .enumerate()
+        .find(|(_, (declared, given))| declared != given)
+    {
+        panic!(
+            "bind group '{label}': binding {index} is declared as a {declared} but was given a {given}"
+        );
+    }
+}
+
+use sealed::Kind;
+
 mod sealed {
+    use std::fmt;
+
     use bytemuck::Pod;
 
     use crate::buffer::{IndirectBuffer, StorageBuffer, UniformBuffer};
@@ -315,9 +377,63 @@ mod sealed {
 
     pub trait Sealed {}
 
+    /// What a binding holds, as far as matching a resource to it goes. The
+    /// finer detail — dimension, format, access — is left to the backend.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Kind {
+        View,
+        Sampler,
+        Uniform,
+        Storage,
+    }
+
+    impl fmt::Display for Kind {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(match self {
+                Self::View => "texture view",
+                Self::Sampler => "sampler",
+                Self::Uniform => "uniform buffer",
+                Self::Storage => "storage buffer",
+            })
+        }
+    }
+
     impl Sealed for TextureView {}
     impl Sealed for Sampler {}
     impl<T: Pod> Sealed for UniformBuffer<T> {}
     impl<T: Pod> Sealed for StorageBuffer<T> {}
     impl Sealed for IndirectBuffer {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sealed::Kind;
+    use super::*;
+
+    #[test]
+    #[should_panic(
+        expected = "bind group 'post': binding 1 is declared as a sampler but was given a texture view"
+    )]
+    fn a_sampler_in_a_texture_slot_is_refused() {
+        check_kinds(
+            "post",
+            &[Kind::View, Kind::Sampler],
+            &[Kind::View, Kind::View],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "has 1 resources but its layout declares 2")]
+    fn the_count_is_still_checked_first() {
+        check_kinds("post", &[Kind::View, Kind::Sampler], &[Kind::View]);
+    }
+
+    #[test]
+    fn matching_kinds_pass() {
+        check_kinds(
+            "x",
+            &[Kind::Uniform, Kind::Storage],
+            &[Kind::Uniform, Kind::Storage],
+        );
+    }
 }

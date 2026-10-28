@@ -73,7 +73,8 @@ impl Sound {
         }
 
         let spec = spec.ok_or_else(|| Error::new("the MP3 file has no audio in it"))?;
-        let channels = spec.channels.count() as u16;
+        let channels =
+            u16::try_from(spec.channels.count()).expect("an MP3 has at most two channels");
         debug!(
             "decoded a {channels}-channel MP3 at {} Hz, {} frames",
             spec.rate,

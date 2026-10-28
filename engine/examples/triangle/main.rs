@@ -48,9 +48,9 @@ mod ui;
 mod lut;
 
 use anyhow::Result;
+use etib::ui::{EguiLayer, PaintTarget};
 use etib::winit::event::WindowEvent;
 use etib::winit::window::Window;
-use etib::ui::EguiLayer;
 use etib::{App, Config, Frame, Gpu, Hdr, PostProcess};
 use log::info;
 
@@ -95,7 +95,8 @@ fn main() -> Result<()> {
 /// else, so the wgpu and naga backends stay quiet unless RUST_LOG asks for them.
 fn init_logging() {
     env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("warn,etib=info,etib_core=info,etib_ui=info,triangle=info"),
+        env_logger::Env::default()
+            .default_filter_or("warn,etib=info,etib_core=info,etib_ui=info,triangle=info"),
     )
     .format_timestamp_millis()
     .init();
@@ -200,8 +201,13 @@ impl App for TriangleApp {
 
         // 2. Post-processing brings that scene-referred image into the display's
         //    range and grades it onto the swapchain image.
-        self.post
-            .draw(&gpu.device, encoder, view, &self.state.grade, self.state.output);
+        self.post.draw(
+            &gpu.device,
+            encoder,
+            view,
+            &self.state.grade,
+            self.state.output,
+        );
 
         // 3. egui paints over the top.
         // Copied out before the panel borrows the state it lives in.
@@ -210,10 +216,12 @@ impl App for TriangleApp {
         self.egui.render(
             &gpu.device,
             encoder,
-            &gpu.window,
-            view,
-            gpu.size(),
-            output,
+            PaintTarget {
+                window: &gpu.window,
+                view,
+                size_in_pixels: gpu.size(),
+                output,
+            },
             |ui| build_panel(ui, state, &stats),
         );
     }

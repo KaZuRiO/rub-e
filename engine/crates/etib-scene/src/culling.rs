@@ -57,10 +57,7 @@ pub(crate) struct StaticLayout {
 pub(crate) fn build_chunks(cubes: &[ModelCube]) -> StaticLayout {
     let mut tiles: HashMap<(i32, i32), Vec<&ModelCube>> = HashMap::new();
     for cube in cubes {
-        let key = (
-            (cube.position.x / CHUNK_SIZE).floor() as i32,
-            (cube.position.z / CHUNK_SIZE).floor() as i32,
-        );
+        let key = tile_of(cube.position);
         tiles.entry(key).or_default().push(cube);
     }
     let mut keys: Vec<_> = tiles.keys().copied().collect();
@@ -83,8 +80,8 @@ pub(crate) fn build_chunks(cubes: &[ModelCube]) -> StaticLayout {
             aabb_min: min.to_array(),
             _pad0: 0.0,
             aabb_max: max.to_array(),
-            start_idx: layout.instances.len() as u32,
-            count: members.len() as u32,
+            start_idx: count(layout.instances.len()),
+            count: count(members.len()),
             _pad1: [0; 3],
         });
         for cube in members {
@@ -92,10 +89,31 @@ pub(crate) fn build_chunks(cubes: &[ModelCube]) -> StaticLayout {
                 Mat4::from_translation(cube.position),
                 cube.color.extend(1.0),
             ));
-            layout.chunk_ids.push(index as u32);
+            layout.chunk_ids.push(count(index));
         }
     }
     layout
+}
+
+/// The XZ tile a position falls in.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a world 32 units a tile would need to be 2^36 units wide to overflow, and `as` saturates"
+)]
+fn tile_of(position: Vec3) -> (i32, i32) {
+    (
+        (position.x / CHUNK_SIZE).floor() as i32,
+        (position.z / CHUNK_SIZE).floor() as i32,
+    )
+}
+
+/// A number of cubes, chunks or indices as the `u32` the shaders count in.
+///
+/// # Panics
+///
+/// Past `u32::MAX`, which the GPU buffers holding them could not index.
+fn count(len: usize) -> u32 {
+    u32::try_from(len).expect("more than u32::MAX cubes, chunks or indices")
 }
 
 /// The two culling pipelines and their layouts. Group 0 of both is the
@@ -177,8 +195,8 @@ impl StaticCubes {
             return None;
         }
         let layout = build_chunks(cubes);
-        let count = layout.instances.len() as u32;
-        let chunk_count = layout.chunks.len() as u32;
+        let count = count(layout.instances.len());
+        let chunk_count = self::count(layout.chunks.len());
 
         let instances = StorageBuffer::from_slice(device, "static instances", &layout.instances);
         let visible = StorageBuffer::new(device, "visible instances", count);
@@ -219,7 +237,7 @@ impl StaticCubes {
             device,
             0,
             &DrawIndexedArgs {
-                index_count: INDICES.len() as u32,
+                index_count: count(INDICES.len()),
                 ..Default::default()
             },
         );

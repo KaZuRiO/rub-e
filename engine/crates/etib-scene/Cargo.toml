@@ -2,6 +2,7 @@
 name = "etib-scene"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Cube scenes for etib: a camera, static and dynamic cube models, GPU frustum culling and an HDR skybox"
 
 [dependencies]
@@ -10,3 +11,9 @@ etib-core = { workspace = true }
 glam = { workspace = true }
 image = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+etib-core = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

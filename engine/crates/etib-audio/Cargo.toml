@@ -2,6 +2,7 @@
 name = "etib-audio"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Sound playback for etib: a mixer over the system's default output device"
 
 [features]
@@ -52,3 +53,6 @@ objc2-app-kit = { workspace = true, optional = true, features = [
     "NSWindow",
 ] }
 objc2-foundation = { workspace = true, optional = true, features = ["NSGeometry"] }
+
+[lints]
+workspace = true

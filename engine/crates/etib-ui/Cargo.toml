@@ -2,6 +2,7 @@
 name = "etib-ui"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "egui integration for etib: input plumbing and the egui paint pass"
 
 [dependencies]
@@ -12,3 +13,6 @@ egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
 log = { workspace = true }
 winit = { workspace = true }
+
+[lints]
+workspace = true

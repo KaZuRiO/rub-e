@@ -12,7 +12,7 @@
 //! # fn go(device: &etib_core::Device, encoder: &mut etib_core::Encoder) -> Result<()> {
 //! let cubes = load_model("world.model")?;
 //! let mut scene = Scene::new(device, &cubes, 1024, 1280, 800);
-//! let ship = scene.add_dynamic(DynamicModel::load("ship.model")?);
+//! let ship = scene.add_dynamic(DynamicModel::load("ship.model")?)?;
 //!
 //! let mut camera = Camera::new(
 //!     glam::Vec3::new(0.0, 30.0, 80.0),
@@ -43,7 +43,7 @@ mod skybox;
 
 pub use camera::{Camera, CameraController, CameraMode, CameraRaw, Move, Projection};
 pub use cube::{CubeRaw, INDICES, VERTICES, Vertex};
-pub use dynamic::DynamicModel;
+pub use dynamic::{DynamicId, DynamicModel};
 pub use error::{Error, Result};
 pub use model::{ModelCube, load_model, parse_model, save_model};
 pub use scene::Scene;

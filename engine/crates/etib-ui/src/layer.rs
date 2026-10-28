@@ -7,6 +7,20 @@ use winit::window::Window;
 
 use crate::composite::Composite;
 
+/// Where [`EguiLayer::render`] paints: the window it reads input from, and the
+/// image it draws over.
+#[derive(Clone, Copy)]
+pub struct PaintTarget<'a> {
+    /// The window the interface belongs to, for its input and its cursor.
+    pub window: &'a Window,
+    /// The image to paint over, which already holds the frame.
+    pub view: &'a TextureView,
+    /// The size of `view`, in physical pixels.
+    pub size_in_pixels: (u32, u32),
+    /// Where SDR white sits on the target surface.
+    pub output: Output,
+}
+
 /// Owns the egui context, the winit input bridge and the paint backend.
 ///
 /// The widgets themselves are none of this type's business: [`EguiLayer::render`]
@@ -34,11 +48,16 @@ impl EguiLayer {
         info!("initialising egui for {target:?} {color_space:?}");
         let context = egui::Context::default();
 
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a scale factor is a small number like 2.0"
+        )]
+        let pixels_per_point = window.scale_factor() as f32;
         let state = egui_winit::State::new(
             context.clone(),
             context.viewport_id(),
             window,
-            Some(window.scale_factor() as f32),
+            Some(pixels_per_point),
             window.theme(),
             // Let egui pick a texture-atlas limit from the device limits.
             Some(device.max_texture_size() as usize),
@@ -101,17 +120,19 @@ impl EguiLayer {
     /// `output` says where SDR white sits on the target surface, so that the
     /// interface lands at the same brightness as the rest of the desktop;
     /// [`Output::SDR`] is right for an ordinary sRGB surface.
-    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         device: &Device,
         encoder: &mut Encoder,
-        window: &Window,
-        target: &TextureView,
-        size_in_pixels: (u32, u32),
-        output: Output,
+        target: PaintTarget<'_>,
         mut build_ui: impl FnMut(&mut egui::Ui),
     ) {
+        let PaintTarget {
+            window,
+            view: target,
+            size_in_pixels,
+            output,
+        } = target;
         let raw_input = self.state.take_egui_input(window);
         let painted = self.context.run_ui(raw_input, |ui| build_ui(ui));
 
@@ -149,7 +170,10 @@ impl EguiLayer {
             &screen_descriptor,
         );
         if !user_buffers.is_empty() {
-            debug!("submitting {} egui user command buffer(s)", user_buffers.len());
+            debug!(
+                "submitting {} egui user command buffer(s)",
+                user_buffers.len()
+            );
             device.raw_queue().submit(user_buffers);
         }
 

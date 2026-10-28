@@ -1,7 +1,10 @@
 //! Colour lookup tables: the cube of colours a grade can be baked into.
 
-use anyhow::{Result, bail, ensure};
 use log::debug;
+
+use crate::lut_error::LutError;
+
+type Result<T, E = LutError> = std::result::Result<T, E>;
 
 /// A 3D colour lookup table — a cube of output colours, indexed by an input
 /// colour's three channels.
@@ -74,12 +77,12 @@ impl Lut {
     pub fn from_rgb(size: u32, rgb: &[f32]) -> Result<Self> {
         check_size(size)?;
         let entries = (size as usize).pow(3);
-        ensure!(
-            rgb.len() == entries * 3,
-            "a {size}-a-side table has {entries} entries, so it needs {} floats, not {}",
-            entries * 3,
-            rgb.len()
-        );
+        if rgb.len() != entries * 3 {
+            return Err(LutError::Length {
+                size,
+                actual: rgb.len(),
+            });
+        }
 
         let mut rgba = Vec::with_capacity(entries * 4);
         for entry in rgb.as_chunks::<3>().0 {
@@ -114,47 +117,54 @@ impl Lut {
                     title = Some(line["TITLE".len()..].trim().trim_matches('"').to_owned());
                 }
                 "LUT_3D_SIZE" => {
-                    let parsed: u32 = fields.next().unwrap_or_default().parse().map_err(|_| {
-                        anyhow::anyhow!("line {line_number}: LUT_3D_SIZE is not a whole number")
-                    })?;
+                    let parsed: u32 = fields
+                        .next()
+                        .unwrap_or_default()
+                        .parse()
+                        .map_err(|_| LutError::SizeNotAWholeNumber { line: line_number })?;
                     check_size(parsed)?;
-                    ensure!(
-                        size.is_none(),
-                        "line {line_number}: the file declares LUT_3D_SIZE twice"
-                    );
+                    if size.is_some() {
+                        return Err(LutError::SizeTwice { line: line_number });
+                    }
                     size = Some(parsed);
                     rgb.reserve((parsed as usize).pow(3) * 3);
                 }
                 "LUT_1D_SIZE" => {
-                    bail!("line {line_number}: this is a 1D table; only 3D ones are supported")
+                    return Err(LutError::OneDimensional { line: line_number });
                 }
                 "DOMAIN_MIN" | "DOMAIN_MAX" => {
-                    let expected = if keyword == "DOMAIN_MIN" { 0.0 } else { 1.0 };
+                    let (keyword, expected) = if keyword == "DOMAIN_MIN" {
+                        ("DOMAIN_MIN", 0.0)
+                    } else {
+                        ("DOMAIN_MAX", 1.0)
+                    };
                     let domain = parse_triple(fields, line_number, keyword, "")?;
-                    ensure!(
-                        domain.iter().all(|value| *value == expected),
-                        "line {line_number}: {keyword} is {domain:?}; only the default \
-                         0..1 domain is supported"
-                    );
+                    if domain.iter().any(|value| *value != expected) {
+                        return Err(LutError::Domain {
+                            line: line_number,
+                            keyword,
+                            domain,
+                        });
+                    }
                 }
                 // Anything else has to be an entry, which is three numbers.
                 _ => {
-                    ensure!(
-                        size.is_some(),
-                        "line {line_number}: an entry appears before LUT_3D_SIZE"
-                    );
+                    if size.is_none() {
+                        return Err(LutError::EntryBeforeSize { line: line_number });
+                    }
                     rgb.extend_from_slice(&parse_triple(fields, line_number, "entry", keyword)?);
                 }
             }
         }
 
-        let size = size.ok_or_else(|| anyhow::anyhow!("the file declares no LUT_3D_SIZE"))?;
+        let size = size.ok_or(LutError::MissingSize)?;
         let entries = (size as usize).pow(3);
-        ensure!(
-            rgb.len() == entries * 3,
-            "the file declares {size} a side, so it should hold {entries} entries, but it has {}",
-            rgb.len() / 3
-        );
+        if rgb.len() != entries * 3 {
+            return Err(LutError::EntryCount {
+                size,
+                actual: rgb.len() / 3,
+            });
+        }
 
         debug!(
             "parsed a {size}³ lookup table{}",
@@ -178,13 +188,11 @@ impl Lut {
 }
 
 fn check_size(size: u32) -> Result<()> {
-    ensure!(
-        (Lut::MIN_SIZE..=Lut::MAX_SIZE).contains(&size),
-        "a lookup table is between {} and {} entries a side, not {size}",
-        Lut::MIN_SIZE,
-        Lut::MAX_SIZE
-    );
-    Ok(())
+    if (Lut::MIN_SIZE..=Lut::MAX_SIZE).contains(&size) {
+        Ok(())
+    } else {
+        Err(LutError::Size { size })
+    }
 }
 
 /// Reads the three numbers a domain or an entry line holds. `first` is the
@@ -193,34 +201,40 @@ fn check_size(size: u32) -> Result<()> {
 fn parse_triple<'a>(
     fields: impl Iterator<Item = &'a str>,
     line_number: usize,
-    what: &str,
+    what: &'static str,
     first: &'a str,
 ) -> Result<[f32; 3]> {
     let values: Vec<f32> = std::iter::once(first)
         .filter(|field| !field.is_empty())
         .chain(fields)
         .map(|field| {
-            field
-                .parse::<f32>()
-                .map_err(|_| anyhow::anyhow!("line {line_number}: '{field}' is not a number"))
+            field.parse::<f32>().map_err(|_| LutError::NotANumber {
+                line: line_number,
+                field: field.to_owned(),
+            })
         })
         .collect::<Result<_>>()?;
 
-    ensure!(
-        values.len() == 3,
-        "line {line_number}: {what} has {} values, not 3",
-        values.len()
-    );
-    ensure!(
-        values.iter().all(|value| value.is_finite()),
-        "line {line_number}: {what} holds a value that is not finite"
-    );
+    if values.len() != 3 {
+        return Err(LutError::WrongCount {
+            line: line_number,
+            what,
+            count: values.len(),
+        });
+    }
+    if !values.iter().all(|value| value.is_finite()) {
+        return Err(LutError::NotFinite {
+            line: line_number,
+            what,
+        });
+    }
     Ok([values[0], values[1], values[2]])
 }
 
 #[cfg(test)]
 mod tests {
     use super::Lut;
+    use crate::LutError;
 
     /// The corners of a 2-a-side identity, which is what an unset LUT binds.
     #[test]
@@ -267,6 +281,30 @@ DOMAIN_MAX 1.0 1.0 1.0
         assert!(err("LUT_3D_SIZE 2\nDOMAIN_MAX 0 0 4\n").contains("only the default"));
         assert!(err("LUT_3D_SIZE 2\n0 0 blue\n").contains("'blue' is not a number"));
         assert!(err("LUT_3D_SIZE 2\n0 0\n").contains("has 2 values, not 3"));
+    }
+
+    #[test]
+    fn refusals_say_which_case_they_are() {
+        assert_eq!(
+            Lut::from_cube("LUT_1D_SIZE 16\n"),
+            Err(LutError::OneDimensional { line: 1 })
+        );
+        assert_eq!(Lut::from_cube("# nothing\n"), Err(LutError::MissingSize));
+        assert_eq!(
+            Lut::from_cube("LUT_3D_SIZE 2\n0 0\n"),
+            Err(LutError::WrongCount {
+                line: 2,
+                what: "entry",
+                count: 2
+            })
+        );
+        assert_eq!(
+            Lut::from_rgb(2, &[0.0; 23]),
+            Err(LutError::Length {
+                size: 2,
+                actual: 23
+            })
+        );
     }
 
     #[test]

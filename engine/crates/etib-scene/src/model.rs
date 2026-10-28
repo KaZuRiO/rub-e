@@ -19,7 +19,9 @@ use crate::error::{Error, Result};
 /// One cube of a model: where it sits and its linear RGB colour.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelCube {
+    /// The cube's centre, in model units: one per cube side.
     pub position: Vec3,
+    /// Linear RGB, 0..1 per channel.
     pub color: Vec3,
 }
 
@@ -44,6 +46,11 @@ pub fn parse_model(content: &str) -> Result<Vec<ModelCube>> {
 
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() != 3 && fields.len() != 6 {
+            log::warn!(
+                "line {} of the model has {} fields, not 3 or 6; skipped",
+                index + 1,
+                fields.len()
+            );
             continue;
         }
         let numbers = fields

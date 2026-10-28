@@ -4,13 +4,13 @@
 use std::f32::consts::PI;
 
 use anyhow::{Context as _, Result};
-use etib::ui::EguiLayer;
+use etib::ui::{EguiLayer, PaintTarget};
 use etib::winit::event::{DeviceEvent, WindowEvent};
 use etib::winit::window::Window;
 use etib::{App, Frame, Gpu, Grade, Output, PostProcess};
 use etib_audio::Listener;
 use etib_input::{Button, Input, KeyCode};
-use etib_scene::{Camera, DynamicModel, Projection, Scene};
+use etib_scene::{Camera, DynamicId, DynamicModel, Projection, Scene};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::demo::{DEMO_GOAL_CAM_DURATION, DemoMode, demo_paddle_input, update_demo_camera};
@@ -48,13 +48,13 @@ const MAX_SPECTATORS: usize = 4000;
 const DYNAMIC_HEADROOM: usize = 100 + 2000 + 10_000;
 
 struct Particle {
-    id: usize,
+    id: DynamicId,
     velocity: Vec3,
     life: f32,
 }
 
 struct Spectator {
-    id: usize,
+    id: DynamicId,
     base_pos: Vec3,
     phase: f32,
     speed: f32,
@@ -64,8 +64,8 @@ struct Spectator {
 /// A player and the models that show them.
 struct Side {
     player: Player,
-    paddle_id: usize,
-    score_id: usize,
+    paddle_id: DynamicId,
+    score_id: DynamicId,
     rendered_score: u32,
     color: Vec3,
     /// Where the score is centred along X.
@@ -82,7 +82,7 @@ pub struct PongApp {
     input: Input,
 
     ball: Ball,
-    ball_id: usize,
+    ball_id: DynamicId,
     left: Side,
     right: Side,
 
@@ -95,12 +95,12 @@ pub struct PongApp {
 
     client: Option<Client>,
 
-    trail_ids: Vec<usize>,
+    trail_ids: Vec<DynamicId>,
     trail_idx: usize,
     last_trail_pos: (i32, i32),
-    shadow_id: usize,
+    shadow_id: DynamicId,
     particles: Vec<Particle>,
-    title_id: usize,
+    title_id: DynamicId,
     spectators: Vec<Spectator>,
 
     /// Seconds since the game started running.
@@ -108,6 +108,8 @@ pub struct PongApp {
     /// Seconds since the display was last asked what it can show.
     since_display_poll: f32,
     sounds: PongSounds,
+    /// Set by the menu's Quit; the runner asks for it after every update.
+    quit_requested: bool,
 }
 
 impl PongApp {
@@ -142,11 +144,17 @@ impl PongApp {
             )
             .context("loading the skybox")?;
 
-        let ball_id = scene.add_dynamic(ball_model);
+        let ball_id = scene
+            .add_dynamic(ball_model)
+            .expect("the scene has room for every model pong adds");
         let mut side = |player: Player, paddle: DynamicModel, color: Vec3, score_x: f32| Side {
             player,
-            paddle_id: scene.add_dynamic(paddle),
-            score_id: scene.add_dynamic(make_score_model(0, score_x, color)),
+            paddle_id: scene
+                .add_dynamic(paddle)
+                .expect("the scene has room for every model pong adds"),
+            score_id: scene
+                .add_dynamic(make_score_model(0, score_x, color))
+                .expect("the scene has room for every model pong adds"),
             rendered_score: 0,
             color,
             score_x,
@@ -181,14 +189,20 @@ impl PongApp {
                     TRAIL_COLOR.z,
                 )]);
                 cube.position = HIDDEN;
-                scene.add_dynamic(cube)
+                scene
+                    .add_dynamic(cube)
+                    .expect("the scene has room for every model pong adds")
             })
             .collect();
-        let shadow_id = scene.add_dynamic(make_shadow());
+        let shadow_id = scene
+            .add_dynamic(make_shadow())
+            .expect("the scene has room for every model pong adds");
 
         let mut title = make_text_model("PONG 3D", -14.0, Vec3::new(0.0, 0.8, 1.0));
         title.position = Vec3::new(0.0, 0.0, 15.0); // Center of field, floating
-        let title_id = scene.add_dynamic(title);
+        let title_id = scene
+            .add_dynamic(title)
+            .expect("the scene has room for every model pong adds");
 
         let spectators = add_spectators(&mut scene, &seats);
         let post = PostProcess::new(&gpu.device, gpu.format(), scene.target_view());
@@ -221,6 +235,7 @@ impl PongApp {
             time: 0.0,
             since_display_poll: 0.0,
             sounds: PongSounds::new(),
+            quit_requested: false,
         })
     }
 
@@ -332,11 +347,14 @@ impl PongApp {
             &mut self.right
         };
         self.scene.remove_dynamic(side.score_id);
-        side.score_id = self.scene.add_dynamic(make_score_model(
-            side.player.score,
-            side.score_x,
-            side.color,
-        ));
+        side.score_id = self
+            .scene
+            .add_dynamic(make_score_model(
+                side.player.score,
+                side.score_x,
+                side.color,
+            ))
+            .expect("the scene has room for every model pong adds");
         side.rendered_score = side.player.score;
 
         let goal_x = if left_scored {
@@ -347,14 +365,14 @@ impl PongApp {
         let color = side.color;
         self.spawn_explosion(Vec3::new(goal_x, prev_ball_pos.y, prev_ball_pos.z), color);
 
-        for s in &mut self.spectators {
+        for (index, s) in self.spectators.iter_mut().enumerate() {
             let on_scoring_side = if left_scored {
                 s.base_pos.x < -FIELD_HALF_W
             } else {
                 s.base_pos.x > FIELD_HALF_W
             };
             let is_central = s.base_pos.y > FIELD_HALF_H;
-            if on_scoring_side || (is_central && s.id % 3 == 0) {
+            if on_scoring_side || (is_central && index % 3 == 0) {
                 s.jump_timer = 1.0;
             }
         }
@@ -374,7 +392,10 @@ impl PongApp {
             )]);
             model.position =
                 origin + Vec3::new((fi * 1.3).sin(), (fi * 1.7).cos(), (fi * 2.3).sin()) * 2.0;
-            let id = self.scene.add_dynamic(model);
+            let id = self
+                .scene
+                .add_dynamic(model)
+                .expect("the scene has room for every model pong adds");
 
             let angle1 = fi * PI * 2.0 / n as f32;
             let angle2 = (fi * 13.0).sin() * std::f32::consts::FRAC_PI_4;
@@ -506,9 +527,9 @@ impl PongApp {
                 }
                 reset_ball(&mut self.ball, true);
             }
-            // As the engine did: there is nothing to save, and the runner has
-            // no way for an application to ask it to stop.
-            UiAction::Quit => std::process::exit(0),
+            // Through the runner rather than `process::exit`, so the sound
+            // device and the connection are closed on the way out.
+            UiAction::Quit => self.quit_requested = true,
         }
     }
 }
@@ -542,7 +563,9 @@ fn add_spectators(scene: &mut Scene, seats: &[Vec3]) -> Vec<Spectator> {
             ]);
             model.position = Vec3::new(pos.x, pos.y, HIDDEN.z);
             Spectator {
-                id: scene.add_dynamic(model),
+                id: scene
+                    .add_dynamic(model)
+                    .expect("the scene has room for every model pong adds"),
                 base_pos: pos,
                 // Pseudo-random, but the same every run.
                 phase: ((i * 555) % 100) as f32 / 100.0 * PI * 2.0,
@@ -554,6 +577,10 @@ fn add_spectators(scene: &mut Scene, seats: &[Vec3]) -> Vec<Spectator> {
 }
 
 impl App for PongApp {
+    fn exit_requested(&self) -> bool {
+        self.quit_requested
+    }
+
     fn window_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
         self.input.window_event(event);
         self.egui.on_window_event(window, event)
@@ -597,10 +624,12 @@ impl App for PongApp {
             self.egui.render(
                 &gpu.device,
                 encoder,
-                &gpu.window,
-                view,
-                gpu.size(),
-                self.output,
+                PaintTarget {
+                    window: &gpu.window,
+                    view,
+                    size_in_pixels: gpu.size(),
+                    output: self.output,
+                },
                 |ui| {
                     action = if !started {
                         main_menu(ui.ctx())

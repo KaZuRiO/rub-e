@@ -35,7 +35,7 @@ mod ui;
 mod lut;
 
 use anyhow::Result;
-use etib::ui::EguiLayer;
+use etib::ui::{EguiLayer, PaintTarget};
 use etib::winit::event::WindowEvent;
 use etib::winit::window::Window;
 use etib::{App, Config, Frame, Gpu, Hdr, PostProcess, Tonemap};
@@ -85,7 +85,10 @@ fn curve_from_args() -> Tonemap {
             continue;
         }
         let Some(name) = args.next() else { break };
-        match Tonemap::ALL.iter().find(|c| c.name().eq_ignore_ascii_case(&name)) {
+        match Tonemap::ALL
+            .iter()
+            .find(|c| c.name().eq_ignore_ascii_case(&name))
+        {
             Some(curve) => return *curve,
             None => info!("unknown curve {name:?}; keeping the default"),
         }
@@ -181,8 +184,13 @@ impl App for ChartApp {
         );
 
         // 2. The pass under test.
-        self.post
-            .draw(&gpu.device, encoder, view, &self.state.grade, self.state.output);
+        self.post.draw(
+            &gpu.device,
+            encoder,
+            view,
+            &self.state.grade,
+            self.state.output,
+        );
 
         // 3. The panel, composited after the grade rather than through it.
         let output = self.state.output;
@@ -190,10 +198,12 @@ impl App for ChartApp {
         self.egui.render(
             &gpu.device,
             encoder,
-            &gpu.window,
-            view,
-            gpu.size(),
-            output,
+            PaintTarget {
+                window: &gpu.window,
+                view,
+                size_in_pixels: gpu.size(),
+                output,
+            },
             |ui| build_panel(ui, state, &stats),
         );
     }

@@ -199,6 +199,10 @@ fn test_instrument() -> Option<PathBuf> {
 
     // This program sits in target/<profile>, and cargo leaves the plugin, an
     // example, in target/<profile>/examples.
-    let examples = std::env::current_exe().ok()?.parent()?.join("examples").join(extension);
+    let examples = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join("examples")
+        .join(extension);
     examples.exists().then_some(examples)
 }

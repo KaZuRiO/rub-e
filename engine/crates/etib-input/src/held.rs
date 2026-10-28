@@ -33,8 +33,9 @@ impl<T: Copy + Eq + Hash> Held<T> {
             if self.down.insert(key) {
                 self.just_pressed.insert(key);
             }
-        } else {
-            self.down.remove(&key);
+        } else if self.down.remove(&key) {
+            // Only a key that was down can be released: one pressed before
+            // the window had focus sends its release here without its press.
             self.just_released.insert(key);
         }
     }
@@ -79,6 +80,13 @@ impl<T: Copy + Eq + Hash> Held<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn releasing_a_key_that_was_not_down_is_not_a_release() {
+        let mut held = Held::default();
+        held.set(1u8, false);
+        assert!(!held.just_released(1));
+    }
 
     #[test]
     fn press_hold_release() {
@@ -127,14 +135,6 @@ mod tests {
         assert!(held.is_down(2));
         assert!(held.just_released(1));
         assert!(!held.just_released(2));
-    }
-
-    #[test]
-    fn releasing_an_unpressed_key() {
-        let mut held = Held::<u32>::default();
-        held.set(26, false);
-        assert!(!held.is_down(26));
-        assert!(held.just_released(26), "as the engine did");
     }
 
     #[test]

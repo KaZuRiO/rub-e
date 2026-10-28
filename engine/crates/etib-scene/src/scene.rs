@@ -11,7 +11,7 @@ use glam::Mat4;
 use crate::camera::{Camera, CameraRaw};
 use crate::cube::{CubeRaw, INDICES, VERTICES, Vertex};
 use crate::culling::{CullingPasses, StaticCubes};
-use crate::dynamic::{DynamicModel, DynamicModels};
+use crate::dynamic::{DynamicId, DynamicModel, DynamicModels};
 use crate::error::Result;
 use crate::model::ModelCube;
 use crate::skybox::Skybox;
@@ -96,7 +96,7 @@ impl Scene {
 
         let dynamic_capacity = dynamic_capacity.max(1);
         let dynamic_buffer =
-            StorageBuffer::new(device, "dynamic instances", dynamic_capacity as u32);
+            StorageBuffer::new(device, "dynamic instances", dynamic_slots(dynamic_capacity));
 
         Self {
             pipeline,
@@ -137,42 +137,47 @@ impl Scene {
         Ok(())
     }
 
+    /// Removes the skybox; the background is cleared to black again.
     pub fn clear_skybox(&mut self) {
         self.skybox = None;
     }
 
     /// Adds a dynamic model and returns the id that moves or removes it.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If the dynamic models would hold more cubes than the scene was built
-    /// with room for.
-    pub fn add_dynamic(&mut self, model: DynamicModel) -> usize {
+    /// [`Error::Capacity`](crate::Error::Capacity) if the dynamic models would
+    /// hold more cubes than the scene was built with room for; nothing is
+    /// added then.
+    pub fn add_dynamic(&mut self, model: DynamicModel) -> Result<DynamicId> {
         self.dynamic.add(model)
     }
 
-    /// Removes a dynamic model; an unknown id is ignored.
-    pub fn remove_dynamic(&mut self, id: usize) {
+    /// Removes a dynamic model; a stale id is ignored.
+    pub fn remove_dynamic(&mut self, id: DynamicId) {
         self.dynamic.remove(id);
     }
 
-    pub fn dynamic(&self, id: usize) -> Option<&DynamicModel> {
+    /// The model `id` names, or `None` once it has been removed.
+    pub fn dynamic(&self, id: DynamicId) -> Option<&DynamicModel> {
         self.dynamic.get(id)
     }
 
     /// The model, to move or recolour. Changes are uploaded by the next
-    /// [`render`](Self::render).
-    pub fn dynamic_mut(&mut self, id: usize) -> Option<&mut DynamicModel> {
+    /// [`render`](Self::render), which panics if a model replaced or grown
+    /// through here takes the scene past its dynamic capacity.
+    pub fn dynamic_mut(&mut self, id: DynamicId) -> Option<&mut DynamicModel> {
         self.dynamic.get_mut(id)
     }
 
+    /// How many static cubes the scene holds, before culling.
     pub fn static_count(&self) -> u32 {
         self.statics.as_ref().map_or(0, |statics| statics.count)
     }
 
     /// Cubes across all the live dynamic models.
     pub fn dynamic_count(&self) -> u32 {
-        self.dynamic.cube_count() as u32
+        dynamic_slots(self.dynamic.cube_count())
     }
 
     /// The scene-referred image, for the presentation pass to sample.
@@ -180,6 +185,7 @@ impl Scene {
         self.target.view()
     }
 
+    /// The size of the target, in pixels.
     pub fn size(&self) -> (u32, u32) {
         self.target.size()
     }
@@ -199,13 +205,13 @@ impl Scene {
     pub fn render(&mut self, device: &Device, encoder: &mut Encoder, camera: &mut Camera) {
         let (width, height) = self.target.size();
         camera.aspect = width as f32 / height as f32;
-        self.camera.write(device, &camera.raw());
+        self.camera.write(device, &camera.advance_frame());
 
         if let Some(instances) = self.dynamic.take_changes() {
             if !instances.is_empty() {
-                self.dynamic_buffer.write(device, 0, &instances);
+                self.dynamic_buffer.write(device, 0, instances);
             }
-            self.dynamic_uploaded = instances.len() as u32;
+            self.dynamic_uploaded = dynamic_slots(instances.len());
         }
 
         if let Some(statics) = &self.statics {
@@ -243,23 +249,24 @@ impl Scene {
     }
 }
 
+/// A number of dynamic cubes as the `u32` instance count a draw takes. Every
+/// count it is given is at most the capacity, which went through it first.
+///
+/// # Panics
+///
+/// For a capacity past `u32::MAX` cubes.
+fn dynamic_slots(cubes: usize) -> u32 {
+    u32::try_from(cubes).expect("a dynamic capacity of more than u32::MAX cubes")
+}
+
 #[cfg(test)]
 mod tests {
+    use etib_core::test_util::device;
     use etib_core::wgpu;
     use glam::Vec3;
 
     use super::*;
     use crate::camera::Projection;
-
-    fn device() -> Option<Device> {
-        match Device::open_headless() {
-            Ok(device) => Some(device),
-            Err(err) => {
-                eprintln!("skipping: {err}");
-                None
-            }
-        }
-    }
 
     fn white_cube(x: f32, y: f32, z: f32) -> ModelCube {
         ModelCube {
@@ -328,9 +335,10 @@ mod tests {
     fn dynamic_models_are_added_moved_and_removed() {
         let Some(device) = device() else { return };
         let mut scene = Scene::new(&device, &[], 10, 800, 600);
-        let id = scene.add_dynamic(DynamicModel::from_cubes(vec![white_cube(0.0, 0.0, 0.0)]));
+        let id = scene
+            .add_dynamic(DynamicModel::from_cubes(vec![white_cube(0.0, 0.0, 0.0)]))
+            .unwrap();
         assert_eq!(scene.dynamic_count(), 1);
-        assert!(scene.dynamic(999).is_none());
 
         scene.dynamic_mut(id).unwrap().position = Vec3::new(5.0, 0.0, 0.0);
         assert_eq!(
@@ -345,7 +353,7 @@ mod tests {
 
         scene.remove_dynamic(id);
         assert!(scene.dynamic(id).is_none());
-        scene.remove_dynamic(999);
+        scene.remove_dynamic(id);
     }
 
     #[test]
@@ -355,7 +363,9 @@ mod tests {
             .map(|i| white_cube((i % 10) as f32 * 4.0, 0.0, (i / 10) as f32 * 4.0))
             .collect();
         let mut scene = Scene::new(&device, &cubes, 4, 64, 64);
-        scene.add_dynamic(DynamicModel::from_cubes(vec![white_cube(0.0, 2.0, 0.0); 4]));
+        scene
+            .add_dynamic(DynamicModel::from_cubes(vec![white_cube(0.0, 2.0, 0.0); 4]))
+            .unwrap();
         scene
             .set_skybox_from_hdr(&device, &tiny_hdr(), 16, Mat4::IDENTITY)
             .expect("the skybox loads");

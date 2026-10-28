@@ -98,9 +98,11 @@ etib::run(Config, build)                        crates/etib/src/app.rs
        └─ build(&gpu) -> App          your pipelines are created here
 ```
 
-`resumed` can fire again if the platform tears the window down and brings it
-back, which is why `build` is `FnMut` and why everything above it is rebuilt
-rather than reused.
+`build` runs once, when the window is created. A later `resumed` keeps the
+window, the device and the application it built; nothing handles `suspended`,
+which only matters on platforms that destroy the window while the program
+lives. If any step fails, the loop exits and `run` returns that error with
+what was being attempted as its context, so `main` exits non-zero.
 
 Two deliberate choices in there:
 
@@ -154,7 +156,8 @@ settings; reading such a file is the application's business.
 
 ```text
   dt = now - last_frame                     fps is an EMA (0.9 old / 0.1 new);
-  app.update(dt)                            a raw 1/dt reads as noise
+  app.update(min(dt, MAX_DT))               a raw 1/dt reads as noise; MAX_DT
+  app.exit_requested()? -> exit             is 0.1 s, so a stall is not a leap
   │
   surface.acquire() ──► Acquired::Frame  draw into it
                         Acquired::Skip   occluded, timed out, or the swapchain
@@ -171,6 +174,11 @@ settings; reading such a file is the application's business.
 
 `ControlFlow::Poll` is set in `about_to_wait`: this animates continuously rather
 than only on input.
+
+An application ends the loop by returning `true` from `App::exit_requested`,
+which the runner asks after every `update` and every window event. The
+application is then dropped normally, so whatever it owns — its sound device,
+its connections — is closed on the way out.
 
 Recoverable swapchain states are handled inside `Surface::acquire` — it
 reconfigures itself where that is the fix, so an application only ever chooses
@@ -643,10 +651,10 @@ submission per frame — the scene records into the frame's encoder.
 
 | Part | Lives in | Notes |
 |---|---|---|
-| `Camera` | the application | Plain maths, no GPU. `raw()` once a frame; it remembers last frame's matrix for `prev_view_proj` |
+| `Camera` | the application | Plain maths, no GPU. `advance_frame()` once a frame; it remembers last frame's matrix for `prev_view_proj` |
 | `CameraController` | the application | Told which way to `Move`, how far the mouse went, how far the wheel turned; which keys mean what is the application's call |
 | Static cubes | the `Scene`, from construction | Sorted into 32×32 XZ chunks on the CPU once; none at all means no culling buffers are created |
-| Dynamic models | the `Scene`, by id | Slots keep their ids and are reused; a fixed capacity in cubes, set at construction |
+| Dynamic models | the `Scene`, by id | Slots are reused behind generational `DynamicId`s, so a removed model's id reaches nothing; a fixed capacity in cubes, set at construction |
 | Skybox | the `Scene`, optional | A `.hdr` is decoded on the CPU, projected onto a `TextureCube` by a compute pass at load time, then sampled linearly |
 
 A cube is a `CubeRaw` — a model matrix and a colour, 80 bytes — read as
@@ -764,10 +772,14 @@ use the long form: `set_pipeline`, `set_bind_group(index, …)`, then
 the backend's error as its `source`, so `{:#}` under anyhow prints the chain.
 `etib-audio` has the same arrangement for the same reason — a leaf crate should
 not make its callers match on cpal's errors or the filesystem's. The `etib`
-layer uses anyhow directly. A shader that fails to compile *panics* rather
+layer uses anyhow only where it meets the application — `run` and the `build`
+closure — and gives its parser its own: `Lut::from_cube` returns a `LutError`
+that says which refusal it is. A shader that fails to compile *panics* rather
 than returning `Err`: shaders are compiled into the binary, so a bad one is a
-bug, not a runtime condition. An uncaptured GPU error is logged by a handler
-installed with the device.
+bug, not a runtime condition. The same goes for pipelines, bind group layouts
+and bind groups: each is created inside a validation error scope
+(`Device::checked`), and the panic names the object and its label. Any other
+GPU error goes to a handler installed with the device, which logs it.
 
 **Logging.** Everything goes through the `log` facade and no crate installs a
 logger. `info` for adapter, surface, device and pipeline lifecycle; `debug` for
@@ -802,8 +814,8 @@ Sound is not part of that: an application that makes a noise builds an `Audio`
 in `MyApp::new` and keeps it in `MyApp`, and plays from `update`, from
 `window_event`, or from anywhere else it likes.
 
-`build` is `FnMut` because the platform may tear the window down and resume it,
-so anything expensive it captures should be cheap to clone or rebuild.
+`build` is called once, when the window exists. To stop, return `true` from
+`App::exit_requested`; an error from `build` comes back out of `etib::run`.
 
 The two examples are the reference:
 
@@ -969,7 +981,8 @@ the binaries with `include_bytes!` so nothing has to be found at runtime.
 - **A LUT is indexed in gamma-encoded space**, and its entries are gamma-encoded
   too.
 - **Shaders compile when the module is created, and panic on failure** — a WGSL
-  typo is a startup crash, not a runtime error you can handle.
+  typo is a startup crash naming the shader, not a runtime error you can
+  handle. Pipelines and bind groups the backend refuses panic the same way.
 - **Spatial sound is worked out on the application's thread.** A
   `SpatialVoice` only ever sets a voice's gain and pan, once a frame; the
   listener never reaches the audio thread.

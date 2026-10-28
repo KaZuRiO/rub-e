@@ -55,8 +55,8 @@ mod shader;
 mod surface;
 mod texture;
 
-#[cfg(test)]
-mod test_util;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_util;
 
 pub use binding::{Access, BindGroup, BindLayout, BindLayoutBuilder, Bindable, Stage};
 pub use buffer::{

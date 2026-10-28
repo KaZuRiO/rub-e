@@ -16,7 +16,19 @@ pub struct UniformBuffer<T> {
 }
 
 impl<T: Pod> UniformBuffer<T> {
+    /// A buffer for one `T`, uninitialised until the first
+    /// [`write`](Self::write).
+    ///
+    /// WGSL rounds a uniform struct up to a multiple of 16 bytes, so a `T`
+    /// whose size is not one is refused at compile time: its fields would not
+    /// line up with the shader's.
     pub fn new(device: &Device, label: &str) -> Self {
+        const {
+            assert!(
+                size_of::<T>().is_multiple_of(16),
+                "a uniform struct's size must be a multiple of 16 bytes (WGSL alignment)"
+            );
+        }
         let buffer = device.raw().create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: size_of::<T>() as u64,
@@ -72,7 +84,7 @@ impl<T: Pod> VertexBuffer<T> {
         );
         Self {
             buffer,
-            len: data.len() as u32,
+            len: element_count(label, data.len()),
             _marker: std::marker::PhantomData,
         }
     }
@@ -100,7 +112,9 @@ impl<T: Pod> VertexBuffer<T> {
 /// Which integer type an [`IndexBuffer`] holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndexFormat {
+    /// Sixteen-bit indices.
     U16,
+    /// Thirty-two-bit indices.
     U32,
 }
 
@@ -155,10 +169,11 @@ impl IndexBuffer {
         Self {
             buffer,
             format,
-            len: len as u32,
+            len: element_count(label, len),
         }
     }
 
+    /// Which integer type the indices are.
     pub fn format(&self) -> IndexFormat {
         self.format
     }
@@ -224,7 +239,7 @@ impl<T: Pod> StorageBuffer<T> {
         let buffer = create_init(device, label, bytemuck::cast_slice(data), storage_usages());
         Self {
             buffer,
-            len: data.len() as u32,
+            len: element_count(label, data.len()),
             _marker: std::marker::PhantomData,
         }
     }
@@ -279,10 +294,15 @@ fn storage_usages() -> wgpu::BufferUsages {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct DrawIndexedArgs {
+    /// How many indices each instance draws.
     pub index_count: u32,
+    /// How many instances are drawn; what a culling pass counts up.
     pub instance_count: u32,
+    /// The first index read from the index buffer.
     pub first_index: u32,
+    /// Added to every index before the vertex is fetched.
     pub base_vertex: i32,
+    /// The first instance's index; must stay zero, see above.
     pub first_instance: u32,
 }
 
@@ -388,6 +408,16 @@ mod sealed {
 
     impl<T: Pod> Sealed for super::VertexBuffer<T> {}
     impl<T: Pod> Sealed for super::StorageBuffer<T> {}
+}
+
+/// A slice's length as the `u32` the GPU counts elements in.
+///
+/// # Panics
+///
+/// Past `u32::MAX` elements, which no draw or dispatch could address anyway.
+fn element_count(label: &str, len: usize) -> u32 {
+    u32::try_from(len)
+        .unwrap_or_else(|_| panic!("buffer '{label}' holds more than u32::MAX elements"))
 }
 
 fn create_init(

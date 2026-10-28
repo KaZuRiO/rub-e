@@ -37,6 +37,7 @@ const SILENCE_DB: f32 = -60.0;
 /// with [`looking_at`](Self::looking_at)`(camera.eye, camera.target)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Listener {
+    /// Where the listener's head is, in world units.
     pub position: Vec3,
     /// Need not be normalised. A zero vector is taken as -Z.
     pub forward: Vec3,
@@ -49,6 +50,8 @@ impl Default for Listener {
 }
 
 impl Listener {
+    /// A listener at `position`, facing along `forward`, which need not be
+    /// normalised.
     pub fn new(position: Vec3, forward: Vec3) -> Self {
         Self { position, forward }
     }
@@ -95,7 +98,9 @@ impl Default for Spatial {
 /// [`Voice::set_pan`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
+    /// The level, where 1.0 is the sound as recorded.
     pub gain: f32,
+    /// Where the sound sits between the ears: -1.0 is hard left, 1.0 hard right.
     pub pan: f32,
 }
 
@@ -164,6 +169,7 @@ pub struct SpatialVoice {
     pub position: Vec3,
     /// The sound's own level, which distance and direction then scale.
     pub volume: f32,
+    /// How the level falls off with distance from the listener.
     pub spatial: Spatial,
 }
 
@@ -208,6 +214,8 @@ impl SpatialVoice {
         &self.voice
     }
 
+    /// Whether the sound is still playing: `false` once a one-shot has ended or
+    /// the voice was stopped.
     pub fn is_playing(&self) -> bool {
         self.voice.is_playing()
     }

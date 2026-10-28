@@ -1,7 +1,7 @@
 //! Window lifecycle, event routing and the frame loop.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use etib_core::{Acquired, Encoder, Hdr, Instance, TextureView, Vsync};
@@ -16,6 +16,7 @@ use crate::gpu::Gpu;
 /// How the window is created. Everything else about the application lives in
 /// the [`App`] implementation.
 pub struct Config {
+    /// The window's title.
     pub title: String,
     /// Initial inner size, in logical pixels.
     pub size: (u32, u32),
@@ -51,23 +52,40 @@ impl Default for Config {
 
 /// Everything the runner hands to [`App::render`] for one frame.
 pub struct Frame<'a> {
+    /// The window, the device and the swapchain.
     pub gpu: &'a Gpu,
     /// The frame's encoder. The runner submits it once `render` returns.
     pub encoder: &'a mut Encoder,
     /// View of the swapchain image this frame draws into.
     pub view: &'a TextureView,
-    pub stats: FrameStats,
+    /// Measurements of this frame, for an overlay.
+    pub stats: FrameStats<'a>,
 }
 
 /// Read-only measurements of the frame in flight, useful for an overlay.
 #[derive(Clone, Debug)]
-pub struct FrameStats {
+pub struct FrameStats<'a> {
     /// Smoothed frame rate; a raw `1 / dt` reads as noise.
     pub fps: f32,
+    /// How many frames have been rendered, this one included.
     pub frame_index: u64,
+    /// The swapchain size in pixels.
     pub surface_size: (u32, u32),
     /// The graphics backend in use, formatted for display.
-    pub backend: String,
+    pub backend: &'a str,
+}
+
+/// The longest step [`App::update`] is ever handed, in seconds.
+///
+/// A frame that took longer — the window was dragged, the process stopped at a
+/// breakpoint, a level was loading — is reported as this much time instead, so
+/// that a simulation advanced by `dt` does not jump through walls and floors to
+/// catch up. Time is lost rather than compressed.
+pub const MAX_DT: f32 = 0.1;
+
+/// The `dt` [`App::update`] is given for a frame that took `elapsed`.
+fn frame_dt(elapsed: Duration) -> f32 {
+    elapsed.as_secs_f32().min(MAX_DT)
 }
 
 /// The application behind the frame loop.
@@ -92,8 +110,17 @@ pub trait App {
     /// The surface has been reconfigured to a new, non-degenerate size.
     fn resize(&mut self, _gpu: &Gpu, _width: u32, _height: u32) {}
 
-    /// Advances state by `dt` seconds, before the frame is recorded.
+    /// Advances state by `dt` seconds, before the frame is recorded. `dt` is
+    /// never more than [`MAX_DT`].
     fn update(&mut self, _dt: f32) {}
+
+    /// Whether the application wants the frame loop to end. Asked after every
+    /// [`update`](Self::update) and every window event; returning `true` exits
+    /// the loop, drops the application where it stands, and returns from
+    /// [`run`].
+    fn exit_requested(&self) -> bool {
+        false
+    }
 
     /// Records this frame's GPU work into `frame.encoder`.
     fn render(&mut self, frame: Frame<'_>);
@@ -101,8 +128,14 @@ pub trait App {
 
 /// Opens a window and runs the frame loop until the application exits.
 ///
-/// `build` is called once the device and surface exist, and again if the
-/// platform tears the window down and resumes it later.
+/// `build` is called once, when the window has been created and the device
+/// and surface exist. A later `resumed` keeps the application it built.
+///
+/// # Errors
+///
+/// If the event loop cannot be created or exits with an error, and if opening
+/// the window, the graphics device or `build` fails — the error that stopped
+/// startup, with what was being attempted as its context.
 pub fn run<A, F>(config: Config, build: F) -> Result<()>
 where
     A: App,
@@ -124,11 +157,16 @@ where
         frame_index: 0,
         fps: 0.0,
         last_fps_log: Instant::now(),
+        failure: None,
     };
 
     event_loop
         .run_app(&mut runner)
         .context("the event loop exited with an error")?;
+
+    if let Some(err) = runner.failure {
+        return Err(err);
+    }
 
     info!("clean shutdown");
     Ok(())
@@ -150,6 +188,8 @@ struct Runner<A, F> {
     frame_index: u64,
     fps: f32,
     last_fps_log: Instant,
+    /// Why startup stopped, for `run` to return once the loop has exited.
+    failure: Option<anyhow::Error>,
 }
 
 impl<A, F> Runner<A, F>
@@ -164,7 +204,8 @@ where
         };
 
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32();
+        let elapsed = now.duration_since(self.last_frame);
+        let dt = elapsed.as_secs_f32();
         self.last_frame = now;
 
         // Exponential moving average; dt can spike badly on the first frame or
@@ -178,14 +219,23 @@ where
             };
         }
 
-        state.app.update(dt);
+        state.app.update(frame_dt(elapsed));
+        if state.app.exit_requested() {
+            info!("the application asked to exit");
+            event_loop.exit();
+            return;
+        }
 
         self.frame_index += 1;
         if now.duration_since(self.last_fps_log).as_secs_f32() >= 1.0 {
             info!("frame {} | {:.1} fps", self.frame_index, self.fps);
             self.last_fps_log = now;
         }
-        trace!("frame {} begin (dt {:.2} ms)", self.frame_index, dt * 1000.0);
+        trace!(
+            "frame {} begin (dt {:.2} ms)",
+            self.frame_index,
+            dt * 1000.0
+        );
 
         let frame = match state.gpu.surface.acquire() {
             Acquired::Frame(frame) => frame,
@@ -205,7 +255,7 @@ where
             fps: self.fps,
             frame_index: self.frame_index,
             surface_size: state.gpu.size(),
-            backend: state.gpu.device.backend().to_owned(),
+            backend: state.gpu.device.backend(),
         };
 
         let mut encoder = state.gpu.device.encoder("frame encoder");
@@ -252,7 +302,7 @@ where
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(err) => {
-                error!("failed to create the window: {err}");
+                self.failure = Some(anyhow::Error::new(err).context("failed to create the window"));
                 event_loop.exit();
                 return;
             }
@@ -266,7 +316,7 @@ where
         ) {
             Ok(gpu) => gpu,
             Err(err) => {
-                error!("graphics initialisation failed: {err:#}");
+                self.failure = Some(err.context("graphics initialisation failed"));
                 event_loop.exit();
                 return;
             }
@@ -275,7 +325,7 @@ where
         let app = match (self.build)(&gpu) {
             Ok(app) => app,
             Err(err) => {
-                error!("application setup failed: {err:#}");
+                self.failure = Some(err.context("application setup failed"));
                 event_loop.exit();
                 return;
             }
@@ -303,16 +353,19 @@ where
         // clicks and keystrokes before the runner reacts to them.
         let window = state.gpu.window.clone();
         let consumed = state.app.window_event(&window, &event);
+        if state.app.exit_requested() {
+            info!("the application asked to exit");
+            event_loop.exit();
+            return;
+        }
 
         match event {
             WindowEvent::CloseRequested => {
                 info!("close requested; shutting down");
                 event_loop.exit();
             }
-            WindowEvent::Resized(size) => {
-                if state.gpu.surface.resize(size.width, size.height) {
-                    state.app.resize(&state.gpu, size.width, size.height);
-                }
+            WindowEvent::Resized(size) if state.gpu.surface.resize(size.width, size.height) => {
+                state.app.resize(&state.gpu, size.width, size.height);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 info!("scale factor changed to {scale_factor:.2}");
@@ -353,5 +406,28 @@ where
             self.frame_index
         );
         self.state = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn frame_dt_is_clamped() {
+        assert_eq!(frame_dt(Duration::ZERO), 0.0);
+        assert_eq!(frame_dt(Duration::from_millis(16)), 0.016);
+        assert_eq!(frame_dt(Duration::from_secs(3)), MAX_DT);
+    }
+
+    #[test]
+    fn an_app_does_not_ask_to_exit_by_default() {
+        struct Nothing;
+        impl App for Nothing {
+            fn render(&mut self, _: Frame<'_>) {}
+        }
+        assert!(!Nothing.exit_requested());
     }
 }

@@ -168,6 +168,8 @@ pub use spatial::{
 #[cfg(feature = "clap")]
 pub use instrument::{Gui, Instrument, InstrumentConfig, ParamInfo, PluginInfo, plugins_in};
 
+#[cfg(feature = "clap")]
+pub use mixer::MAX_INSTRUMENTS;
 /// How many sounds may be playing at once. Past this, starting another takes
 /// the oldest one; [`Audio::stolen`] counts how often that has happened.
 pub use mixer::MAX_VOICES;
