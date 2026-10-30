@@ -166,19 +166,28 @@ settings; reading such a file is the application's business.
                                          was just rebuilt — ask for another
                         Acquired::Fatal  unusable; shut down
   │
-  encoder = device.encoder("frame encoder")
+  device.poll_timings()         never blocks; keeps the newest result
+  encoder = device.timed_encoder("frame encoder", frame_index)
   app.render(Frame { gpu, encoder, view, stats })    ← all your passes go here
   │
   device.submit(encoder)        one command buffer for the whole frame
   frame.present(&device)
+  app.exit_requested()? -> exit
   window.request_redraw()       animation is continuous, so always ask again
 ```
 
 `ControlFlow::Poll` is set in `about_to_wait`: this animates continuously rather
 than only on input.
 
+The frame encoder is a timed one: where the device has `TIMESTAMP_QUERY`, each
+pass is bracketed by GPU timestamps and the results are read back without
+waiting. `FrameStats::gpu` holds the newest `GpuTimings` to arrive, which trails
+the frame in flight by a few frames (its `tag` is the `frame_index` it
+measured); it stays `None` without the feature. `Device::encoder()` is untimed.
+
 An application ends the loop by returning `true` from `App::exit_requested`,
-which the runner asks after every `update` and every window event. The
+which the runner asks after every `update`, every window event and every
+presented frame. The
 application is then dropped normally, so whatever it owns — its sound device,
 its connections — is closed on the way out.
 

@@ -131,8 +131,8 @@ pub use etib_audio as audio;
 // not have to name `etib_core` to use them.
 pub use etib_core::{
     BindGroup, BindLayout, Blend, Color, ColorSpace, ComputePipeline, Device, Display, Encoder,
-    Hdr, Load, Output, RenderPipeline, RenderTexture, Shader, Stage, StorageFormat, StorageTexture,
-    Surface, TextureFormat, TextureView, UniformBuffer, Vsync,
+    GpuTimings, Hdr, Load, Output, PassTime, RenderPipeline, RenderTexture, Shader, Stage,
+    StorageFormat, StorageTexture, Surface, TextureFormat, TextureView, UniformBuffer, Vsync,
 };
 
 // Re-exported so downstream code cannot accidentally link a second, mismatched
