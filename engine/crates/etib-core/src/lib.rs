@@ -54,6 +54,7 @@ mod pipeline;
 mod shader;
 mod surface;
 mod texture;
+mod timing;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util;
@@ -78,6 +79,7 @@ pub use texture::{
     DepthTexture, Filter, RenderTexture, Sampler, StorageFormat, StorageTexture, Texture2d,
     Texture3d, TextureCube, TextureFormat, TextureView,
 };
+pub use timing::{GpuTimings, PassTime};
 
 // For `#[derive(Pod)]` on shader parameter structs, and for interop.
 pub use {bytemuck, wgpu};
