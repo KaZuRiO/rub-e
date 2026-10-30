@@ -9,3 +9,4 @@ config.json
 .vscode/
 # The old engine, kept locally until what is not ported yet is ported.
 unported/
+bench-results/

@@ -84,7 +84,10 @@ fn color(x: i32, y: i32, z: i32, top: i32) -> Vec3 {
 /// terrain.
 const KEYFRAMES: [(Vec3, Vec3); 3] = [
     // Skimming the towers.
-    (Vec3::new(-100.0, 16.0, -110.0), Vec3::new(-50.0, 18.0, -60.0)),
+    (
+        Vec3::new(-100.0, 16.0, -110.0),
+        Vec3::new(-50.0, 18.0, -60.0),
+    ),
     // Flying over them.
     (Vec3::new(20.0, 70.0, 20.0), Vec3::new(60.0, 10.0, 60.0)),
     // The whole terrain in view.

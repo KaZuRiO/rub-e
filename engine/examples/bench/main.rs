@@ -11,6 +11,16 @@ mod scenario;
 )]
 mod collect;
 
+// `results_dir` is only used by the bench app, even under test.
+#[expect(dead_code, reason = "used by the bench app in a later task")]
+mod results;
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the bench app in a later task")
+)]
+mod compare;
+
 fn main() {
     println!("{} cubes", scenario::world().len());
 }
