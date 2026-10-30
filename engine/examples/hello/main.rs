@@ -26,7 +26,9 @@
 //! `--sdr` and `--hdr` force the surface either way, as in the other examples.
 //! `--fullscreen` opens borderless fullscreen, and `--no-vsync` lifts the cap
 //! at the display's refresh rate, which a frame rate comparison wants. The
-//! window title shows the frame rate and the cube counts.
+//! window title shows the frame rate, the GPU time of a frame (`n/a` on a
+//! device without timestamp queries) and the cube counts; once a second, the
+//! log lists the GPU time of each pass.
 
 mod world;
 
@@ -145,6 +147,8 @@ struct HelloApp {
     elapsed: f32,
     /// Seconds since the title and the display were last refreshed.
     since_poll: f32,
+    /// Seconds since the GPU pass times were last logged.
+    since_gpu_log: f32,
 }
 
 impl HelloApp {
@@ -210,6 +214,7 @@ impl HelloApp {
             elapsed: 0.0,
             // Due straight away, so the title shows the counts from the start.
             since_poll: 1.0,
+            since_gpu_log: 0.0,
         })
     }
 
@@ -266,6 +271,7 @@ impl App for HelloApp {
     fn update(&mut self, dt: f32) {
         self.elapsed += dt;
         self.since_poll += dt;
+        self.since_gpu_log += dt;
         let t = self.elapsed * 0.5;
         if let Some(cat) = self.scene.dynamic_mut(self.orbiting) {
             cat.position = Vec3::new(t.sin() * 30.0, 6.0, t.cos() * 30.0);
@@ -299,12 +305,27 @@ impl App for HelloApp {
         if self.since_poll >= 0.5 {
             self.since_poll = 0.0;
             self.output = Output::detect(gpu.color_space(), &gpu.surface.display());
+            let gpu_ms = match &stats.gpu {
+                Some(timings) => format!("{:.2} ms", timings.total_ms),
+                None => "n/a".to_owned(),
+            };
             gpu.window.set_title(&format!(
-                "etib - hello - {:.0} fps | static: {} cubes | dynamic: {} cubes",
+                "etib - hello - {:.0} fps | gpu {gpu_ms} | static: {} cubes | dynamic: {} cubes",
                 stats.fps,
                 self.scene.static_count(),
                 self.scene.dynamic_count(),
             ));
+        }
+        if self.since_gpu_log >= 1.0
+            && let Some(timings) = &stats.gpu
+        {
+            self.since_gpu_log = 0.0;
+            let passes: Vec<String> = timings
+                .passes
+                .iter()
+                .map(|pass| format!("{} {:.2} ms", pass.label, pass.ms))
+                .collect();
+            info!("gpu: {}", passes.join(", "));
         }
 
         self.scene.render(&gpu.device, encoder, &mut self.camera);
