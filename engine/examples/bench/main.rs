@@ -22,7 +22,7 @@ mod scenario;
 use std::cell::Cell;
 use std::process::ExitCode;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
@@ -93,6 +93,11 @@ enum Outcome {
 
 /// Plays the scenario; `Ok(false)` when nothing was saved.
 fn save_run(name: String) -> Result<bool> {
+    results::check_name(&name)?;
+    let existing = results::results_dir().join(format!("{name}.json"));
+    if existing.exists() {
+        warn!("{} will be overwritten", existing.display());
+    }
     let cubes = scenario::world();
     info!("{} cubes generated", cubes.len());
     let outcome = Rc::new(Cell::new(Outcome::Running));
@@ -133,8 +138,9 @@ struct BenchApp {
     generated_cubes: u32,
     /// Frames rendered so far, which picks the camera pose.
     bench_frame: u32,
-    /// The step of the frame being rendered, in seconds.
-    dt: f32,
+    /// When the previous frame was rendered. The bench times frames itself:
+    /// `App::update`'s step is capped at `MAX_DT`, which would hide stalls.
+    last_render: Option<Instant>,
     outcome: Rc<Cell<Outcome>>,
 }
 
@@ -180,7 +186,7 @@ impl BenchApp {
             surface_size: (width, height),
             generated_cubes,
             bench_frame: 0,
-            dt: 0.0,
+            last_render: None,
             outcome,
         })
     }
@@ -240,10 +246,6 @@ impl App for BenchApp {
         }
     }
 
-    fn update(&mut self, dt: f32) {
-        self.dt = dt;
-    }
-
     fn exit_requested(&self) -> bool {
         self.outcome.get() != Outcome::Running
     }
@@ -255,6 +257,13 @@ impl App for BenchApp {
             view,
             stats,
         } = frame;
+
+        let now = Instant::now();
+        // The time since the previous frame; the first one is never measured.
+        let dt = self
+            .last_render
+            .replace(now)
+            .map_or(0.0, |last| (now - last).as_secs_f32());
 
         (self.camera.eye, self.camera.target) = scenario::camera_at(self.bench_frame);
         self.scene.render(&gpu.device, encoder, &mut self.camera);
@@ -268,7 +277,7 @@ impl App for BenchApp {
         if let Err(err) = self.collector.frame_rendered(
             stats.frame_index,
             self.bench_frame,
-            self.dt,
+            dt,
             stats.surface_size,
         ) {
             error!("{err}");

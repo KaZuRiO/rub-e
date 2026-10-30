@@ -54,14 +54,25 @@ pub fn git_info() -> GitInfo {
     let commit = git(&["rev-parse", "--short", "HEAD"])
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .filter(|commit| !commit.is_empty());
-    let dirty = git(&["status", "--porcelain"]).is_some_and(|out| !out.stdout.is_empty());
+    // Untracked files, such as notes or saved results, change no code.
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+        .is_some_and(|out| !out.stdout.is_empty());
     GitInfo { commit, dirty }
 }
 
-/// Where runs are saved: `bench-results/` at the repository root.
+/// Where runs are saved: `bench-results/` in the engine's workspace.
 pub fn results_dir() -> PathBuf {
     let examples = Path::new(env!("CARGO_MANIFEST_DIR"));
     examples.parent().unwrap_or(examples).join("bench-results")
+}
+
+/// Fails unless `name` can be a file name inside the results directory, so a
+/// run is not played to the end only to fail when it is saved.
+pub fn check_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
+        bail!("'{name}' cannot name a run: use a plain file name, like 'before'");
+    }
+    Ok(())
 }
 
 /// Writes `<dir>/<name>.json`; the flag says whether a file was overwritten.
@@ -145,6 +156,15 @@ pub mod tests {
             err.contains("absent") && err.contains("absent.json"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_name_must_be_a_plain_file_name() {
+        assert!(check_name("before").is_ok());
+        assert!(check_name("hi-z_2").is_ok());
+        for bad in ["", ".", "..", "../x", "a/b", "a\\b", ".hidden"] {
+            assert!(check_name(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

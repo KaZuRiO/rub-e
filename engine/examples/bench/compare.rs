@@ -70,10 +70,17 @@ pub fn compare(a: &RunResults, b: &RunResults) -> String {
         let _ = writeln!(out, "warning: not the same machine or resolution");
     }
     for (side, run) in [("a", a), ("b", b)] {
+        let gpu_samples = run.gpu_total.map_or(0, |s| s.samples);
         if !run.gpu_timing {
             let _ = writeln!(
                 out,
                 "note: run {side} has no GPU timestamps, GPU rows are empty"
+            );
+        } else if gpu_samples < run.scenario.measured_frames {
+            let _ = writeln!(
+                out,
+                "note: run {side} has GPU timings for only {gpu_samples} of {} measured frames",
+                run.scenario.measured_frames
             );
         }
     }
@@ -168,6 +175,21 @@ mod tests {
         assert!(line.contains('—'));
         assert!(out.contains("timestamp"), "{out}");
         assert!(!out.contains("NaN") && !out.contains("inf"), "{out}");
+    }
+
+    #[test]
+    fn compare_notes_a_run_missing_gpu_samples() {
+        let a = run("a", 4.0);
+        assert!(!compare(&a, &a).contains("note"));
+        let mut b = run("b", 4.0);
+        b.gpu_total.as_mut().unwrap().samples = 40;
+        let out = compare(&a, &b);
+        assert!(
+            out.contains("run b has GPU timings for only 40 of 100"),
+            "{out}"
+        );
+        b.gpu_total = None;
+        assert!(compare(&a, &b).contains("only 0 of 100"));
     }
 
     #[test]

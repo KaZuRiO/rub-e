@@ -95,13 +95,13 @@ const KEYFRAMES: [(Vec3, Vec3); 3] = [
 ];
 
 /// The camera `(eye, target)` at `frame`. During warm-up it holds the first
-/// pose; the measured frames interpolate linearly between the keyframes; after
-/// them it holds the last.
+/// pose; the measured frames interpolate linearly between the keyframes, the
+/// last of them on the last pose, which is then held.
 ///
 /// The perspective camera needs `far >= FAR_DISTANCE` to show the far view.
 pub fn camera_at(frame: u32) -> (Vec3, Vec3) {
-    let t = frame.saturating_sub(WARMUP_FRAMES).min(MEASURED_FRAMES) as f32
-        / MEASURED_FRAMES as f32
+    let last = MEASURED_FRAMES - 1;
+    let t = frame.saturating_sub(WARMUP_FRAMES).min(last) as f32 / last as f32
         * (KEYFRAMES.len() - 1) as f32;
     let i = (t as usize).min(KEYFRAMES.len() - 2);
     let f = t - i as f32;
@@ -145,5 +145,9 @@ mod tests {
         let end = WARMUP_FRAMES + MEASURED_FRAMES;
         assert_eq!(camera_at(end), camera_at(end + GRACE_FRAMES));
         assert_ne!(camera_at(WARMUP_FRAMES), camera_at(end));
+        // Both ends of the path are measured.
+        assert_eq!(camera_at(WARMUP_FRAMES), (KEYFRAMES[0].0, KEYFRAMES[0].1));
+        let last = KEYFRAMES[KEYFRAMES.len() - 1];
+        assert_eq!(camera_at(end - 1), (last.0, last.1));
     }
 }
