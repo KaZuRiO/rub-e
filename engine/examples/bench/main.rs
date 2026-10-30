@@ -5,6 +5,12 @@
 #[expect(dead_code, reason = "used by the bench app in a later task")]
 mod scenario;
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the bench app in a later task")
+)]
+mod collect;
+
 fn main() {
     println!("{} cubes", scenario::world().len());
 }
