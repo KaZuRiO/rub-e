@@ -59,6 +59,8 @@ pub struct Collector {
     /// `frame_index` -> bench frame, for every rendered frame.
     frames: HashMap<u64, u32>,
     cpu_ms: Vec<f32>,
+    /// Measured bench frames already recorded; a repeat keeps the first dt.
+    measured_seen: HashSet<u32>,
     /// Tags whose GPU result was accepted, so none counts twice.
     accepted: HashSet<u64>,
     gpu_total_ms: Vec<f32>,
@@ -76,6 +78,7 @@ impl Collector {
             gpu_timing,
             frames: HashMap::new(),
             cpu_ms: Vec::new(),
+            measured_seen: HashSet::new(),
             accepted: HashSet::new(),
             gpu_total_ms: Vec::new(),
             passes: Vec::new(),
@@ -101,8 +104,8 @@ impl Collector {
                 to.1
             );
         }
-        self.frames.insert(frame_index, bench_frame);
-        if is_measured(bench_frame) {
+        self.frames.entry(frame_index).or_insert(bench_frame);
+        if is_measured(bench_frame) && self.measured_seen.insert(bench_frame) {
             self.cpu_ms.push(dt * 1000.0);
         }
         Ok(())
@@ -137,7 +140,7 @@ impl Collector {
     /// True once every measured frame is rendered and either all their GPU
     /// results arrived, GPU timing is off, or the grace period is over.
     pub fn is_done(&self, bench_frame: u32) -> bool {
-        let rendered = self.cpu_ms.len() >= MEASURED_FRAMES as usize;
+        let rendered = self.measured_seen.len() >= MEASURED_FRAMES as usize;
         let gpu_complete = self.gpu_total_ms.len() >= MEASURED_FRAMES as usize;
         let grace_over = bench_frame >= WARMUP_FRAMES + MEASURED_FRAMES + GRACE_FRAMES;
         rendered && (!self.gpu_timing || gpu_complete || grace_over)
@@ -279,6 +282,31 @@ mod tests {
         assert!(!c.is_done(end));
         assert!(c.is_done(end + GRACE_FRAMES));
         assert!(c.finish().gpu_total.is_none());
+    }
+
+    #[test]
+    fn a_repeated_measured_frame_counts_once_and_keeps_the_first_dt() {
+        let mut c = Collector::new((1280, 720), false);
+        let end = WARMUP_FRAMES + MEASURED_FRAMES;
+        c.frame_rendered(1, WARMUP_FRAMES, 0.004, (1280, 720))
+            .unwrap();
+        // Same bench frame again (same and different frame_index), other dt.
+        c.frame_rendered(1, WARMUP_FRAMES, 0.9, (1280, 720))
+            .unwrap();
+        c.frame_rendered(2, WARMUP_FRAMES, 0.9, (1280, 720))
+            .unwrap();
+        let cpu = c.finish().cpu_frame;
+        assert_eq!(cpu.samples, 1);
+        assert!((cpu.median_ms - 4.0).abs() < 1e-4);
+        // Repeat one frame until the raw call count reaches MEASURED_FRAMES.
+        for i in 0..MEASURED_FRAMES as u64 {
+            c.frame_rendered(10 + i, WARMUP_FRAMES, 0.004, (1280, 720))
+                .unwrap();
+        }
+        assert_eq!(c.finish().cpu_frame.samples, 1);
+        assert!(!c.is_done(end));
+        // The size check still applies to repeats.
+        assert!(c.frame_rendered(1, WARMUP_FRAMES, 0.004, (1, 1)).is_err());
     }
 
     #[test]
