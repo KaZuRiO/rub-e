@@ -60,7 +60,8 @@ pub fn git_info() -> GitInfo {
 
 /// Where runs are saved: `bench-results/` at the repository root.
 pub fn results_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench-results")
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR"));
+    examples.parent().unwrap_or(examples).join("bench-results")
 }
 
 /// Writes `<dir>/<name>.json`; the flag says whether a file was overwritten.
