@@ -10,6 +10,7 @@ use crate::buffer::{IndexBuffer, IndirectBuffer, VertexSource};
 use crate::device::Device;
 use crate::pipeline::{ComputePipeline, RenderPipeline};
 use crate::texture::{DepthTexture, TextureView};
+use crate::timing::Lease;
 
 /// A colour in linear space, 0..1 per channel.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -62,26 +63,35 @@ pub enum DepthLoad {
 
 /// A frame's recorded work, built up and then submitted in one go.
 ///
-/// Open it with [`Device::encoder`] and hand it to [`Device::submit`] when the
-/// frame is complete.
+/// Open it with [`Device::encoder`], or [`Device::timed_encoder`] to have its
+/// passes timed, and hand it to [`Device::submit`] when the frame is complete.
 pub struct Encoder {
     inner: wgpu::CommandEncoder,
+    timing: Option<Lease>,
 }
 
 impl Encoder {
-    pub(crate) fn new(device: &Device, label: &str) -> Self {
+    pub(crate) fn new(device: &Device, label: &str, timing: Option<Lease>) -> Self {
         Self {
             inner: device
                 .raw()
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) }),
+            timing,
         }
     }
 
     /// Opens a compute pass. Drop it to end the pass.
     pub fn compute_pass(&mut self, label: &str) -> ComputePass<'_> {
+        let slots = self.timing.as_mut().and_then(|t| t.next_pass(label));
         let pass = self.inner.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(label),
-            timestamp_writes: None,
+            timestamp_writes: slots.zip(self.timing.as_ref()).map(|((begin, end), t)| {
+                wgpu::ComputePassTimestampWrites {
+                    query_set: t.query_set(),
+                    beginning_of_pass_write_index: Some(begin),
+                    end_of_pass_write_index: Some(end),
+                }
+            }),
         });
         ComputePass {
             inner: pass.forget_lifetime(),
@@ -120,8 +130,16 @@ impl Encoder {
         load: Load,
         depth: Option<(&DepthTexture, DepthLoad)>,
     ) -> RenderPass<'a> {
+        let slots = self.timing.as_mut().and_then(|t| t.next_pass(label));
         let pass = self.inner.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
+            timestamp_writes: slots.zip(self.timing.as_ref()).map(|((begin, end), t)| {
+                wgpu::RenderPassTimestampWrites {
+                    query_set: t.query_set(),
+                    beginning_of_pass_write_index: Some(begin),
+                    end_of_pass_write_index: Some(end),
+                }
+            }),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target.raw(),
                 depth_slice: None,
@@ -160,8 +178,12 @@ impl Encoder {
         }
     }
 
-    pub(crate) fn finish(self) -> wgpu::CommandBuffer {
-        self.inner.finish()
+    /// The recorded commands, and the timing slot to start reading back once
+    /// they are submitted. A timed encoder with no timed pass gives no slot:
+    /// it is released here.
+    pub(crate) fn finish(mut self) -> (wgpu::CommandBuffer, Option<Lease>) {
+        let lease = self.timing.take().filter(|t| t.resolve(&mut self.inner));
+        (self.inner.finish(), lease)
     }
 
     /// Interop: the underlying wgpu encoder.
@@ -300,5 +322,114 @@ impl RenderPass<'_> {
     /// Interop: the underlying wgpu pass.
     pub fn raw_mut(&mut self) -> &mut wgpu::RenderPass<'static> {
         &mut self.inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util;
+    use crate::texture::{RenderTexture, TextureFormat};
+    use crate::timing::{GpuTimings, MAX_TIMED_PASSES, TIMING_SLOTS};
+
+    /// Waits for the GPU, then polls until at least one result is in, and
+    /// returns everything that came out.
+    fn wait_for_all(device: &Device) -> Vec<GpuTimings> {
+        let mut all = Vec::new();
+        for _ in 0..100 {
+            device
+                .raw()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("poll failed");
+            all.extend(device.poll_timings());
+            if !all.is_empty() {
+                break;
+            }
+        }
+        all
+    }
+
+    fn wait_for_timings(device: &Device) -> GpuTimings {
+        wait_for_all(device)
+            .into_iter()
+            .next()
+            .expect("no timings arrived")
+    }
+
+    #[test]
+    fn a_timed_encoder_reports_each_pass_in_order() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        if !device.gpu_timing_available() {
+            return;
+        }
+        let target = RenderTexture::new(&device, "target", 16, 16, TextureFormat::RGBA8_SRGB);
+        let mut encoder = device.timed_encoder("t", 42);
+        drop(encoder.compute_pass("a"));
+        drop(encoder.render_pass("b", target.view(), Load::Clear(Color::BLACK)));
+        device.submit(encoder);
+
+        let t = wait_for_timings(&device);
+        assert_eq!(t.tag, 42);
+        let labels: Vec<_> = t.passes.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["a", "b"]);
+        assert!(t.passes.iter().all(|p| p.ms >= 0.0));
+        assert!(t.total_ms >= t.passes.iter().map(|p| p.ms).fold(0.0, f32::max));
+    }
+
+    #[test]
+    fn passes_beyond_the_limit_are_not_timed() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        if !device.gpu_timing_available() {
+            return;
+        }
+        let mut encoder = device.timed_encoder("many", 1);
+        for _ in 0..=MAX_TIMED_PASSES {
+            drop(encoder.compute_pass("p"));
+        }
+        device.submit(encoder);
+        assert_eq!(
+            wait_for_timings(&device).passes.len(),
+            MAX_TIMED_PASSES as usize
+        );
+    }
+
+    #[test]
+    fn running_out_of_slots_falls_back_to_an_untimed_encoder() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        if !device.gpu_timing_available() {
+            return;
+        }
+        for tag in 0..=TIMING_SLOTS as u64 {
+            let mut encoder = device.timed_encoder("slot", tag);
+            drop(encoder.compute_pass("p"));
+            device.submit(encoder);
+        }
+        let got = wait_for_all(&device);
+        assert!(!got.is_empty());
+        assert!(got.len() <= TIMING_SLOTS);
+    }
+
+    #[test]
+    fn a_plain_encoder_is_never_timed() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        if !device.gpu_timing_available() {
+            return;
+        }
+        let mut encoder = device.encoder("plain");
+        drop(encoder.compute_pass("p"));
+        device.submit(encoder);
+        device
+            .raw()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll failed");
+        assert!(device.poll_timings().is_empty());
     }
 }
