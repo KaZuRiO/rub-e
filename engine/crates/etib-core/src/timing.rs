@@ -21,8 +21,15 @@ use log::{debug, warn};
 pub(crate) const MAX_TIMED_PASSES: u32 = 32;
 
 /// How many timed submissions may be in flight at once. A timed encoder asked
-/// for while all are busy is an ordinary one.
-pub(crate) const TIMING_SLOTS: usize = 4;
+/// for while all are busy is an ordinary one. A slot only comes back once a
+/// later poll sees its readback finished, so without vsync, with the CPU a few
+/// frames ahead of the GPU, each one stays busy for several frames.
+pub(crate) const TIMING_SLOTS: usize = 8;
+
+/// Polls after which a readback that has not finished is reported as stuck.
+/// It keeps its slot, which cannot be reused while the map is pending, but no
+/// longer holds back the results submitted after it.
+const STUCK_POLLS: u32 = 120;
 
 /// Timestamps per slot: a begin and an end for each timed pass.
 const TIMESTAMPS_PER_SLOT: u32 = 2 * MAX_TIMED_PASSES;
@@ -130,6 +137,34 @@ struct Pending {
     tag: u64,
     labels: Vec<String>,
     state: Arc<AtomicU8>,
+    /// Polls that have seen it still mapping.
+    polls: u32,
+}
+
+/// Removes the submissions whose readback has ended, ready or failed, and
+/// returns them in submission order. Those still mapping stay, and one that
+/// has been for [`STUCK_POLLS`] polls is reported once.
+fn take_finished(pending: &mut VecDeque<Pending>) -> Vec<(Pending, u8)> {
+    let mut finished = Vec::new();
+    let mut waiting = VecDeque::with_capacity(pending.len());
+    for mut p in pending.drain(..) {
+        let state = p.state.load(Ordering::Acquire);
+        if state == MAP_PENDING {
+            p.polls += 1;
+            if p.polls == STUCK_POLLS {
+                warn!(
+                    "GPU timings for tag {} have not come back after {STUCK_POLLS} polls; \
+                     its timing slot stays busy",
+                    p.tag
+                );
+            }
+            waiting.push_back(p);
+        } else {
+            finished.push((p, state));
+        }
+    }
+    *pending = waiting;
+    finished
 }
 
 /// The pool of measurement slots, shared by every clone of a [`Device`].
@@ -139,6 +174,8 @@ pub(crate) struct Timer {
     /// In submission order.
     pending: VecDeque<Pending>,
     period_ns: f32,
+    /// Whether running out of slots has been reported.
+    busy_logged: bool,
 }
 
 impl Timer {
@@ -150,6 +187,7 @@ impl Timer {
             free: (0..TIMING_SLOTS).rev().collect(),
             pending: VecDeque::new(),
             period_ns: queue.get_timestamp_period(),
+            busy_logged: false,
         }
     }
 
@@ -158,7 +196,15 @@ impl Timer {
     pub(crate) fn lease(timer: &Arc<Mutex<Self>>, tag: u64) -> Option<Lease> {
         let mut guard = timer.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(index) = guard.free.pop() else {
-            debug!("every timing slot is busy: this encoder will not be timed");
+            if guard.busy_logged {
+                debug!("every timing slot is busy: this encoder will not be timed");
+            } else {
+                guard.busy_logged = true;
+                warn!(
+                    "all {TIMING_SLOTS} GPU timing slots are busy: some frames will not be \
+                     timed (reported once)"
+                );
+            }
             return None;
         };
         let slot = Arc::clone(&guard.slots[index]);
@@ -175,17 +221,10 @@ impl Timer {
     }
 
     /// The finished measurements, oldest first, with their slots returned to
-    /// the pool. Stops at the first one still being mapped.
+    /// the pool. One still being mapped does not hold back those after it.
     pub(crate) fn collect(&mut self) -> Vec<GpuTimings> {
         let mut done = Vec::new();
-        while let Some(front) = self.pending.front() {
-            let state = front.state.load(Ordering::Acquire);
-            if state == MAP_PENDING {
-                break;
-            }
-            let Some(pending) = self.pending.pop_front() else {
-                break;
-            };
+        for (pending, state) in take_finished(&mut self.pending) {
             let ticks = (state == MAP_READY)
                 .then(|| read_ticks(&self.slots[pending.slot], pending.labels.len()))
                 .flatten();
@@ -299,6 +338,7 @@ impl Lease {
                 tag: self.tag,
                 labels: std::mem::take(&mut self.labels),
                 state,
+                polls: 0,
             });
     }
 }
@@ -357,6 +397,51 @@ mod tests {
         let t = to_timings(0, &["a".to_owned()], &[5, 3], 1_000_000.0);
         assert_eq!(t.passes[0].ms, 0.0);
         assert_eq!(t.total_ms, 0.0);
+    }
+
+    fn pending(tag: u64, state: u8) -> Pending {
+        Pending {
+            slot: 0,
+            tag,
+            labels: Vec::new(),
+            state: Arc::new(AtomicU8::new(state)),
+            polls: 0,
+        }
+    }
+
+    fn tags(ps: &VecDeque<Pending>) -> Vec<u64> {
+        ps.iter().map(|p| p.tag).collect()
+    }
+
+    #[test]
+    fn a_readback_still_mapping_does_not_hold_back_later_ones() {
+        let mut ps: VecDeque<_> = [
+            pending(1, MAP_PENDING),
+            pending(2, MAP_READY),
+            pending(3, MAP_FAILED),
+            pending(4, MAP_READY),
+        ]
+        .into();
+        let finished: Vec<(u64, u8)> = take_finished(&mut ps)
+            .into_iter()
+            .map(|(p, state)| (p.tag, state))
+            .collect();
+        assert_eq!(finished, [(2, MAP_READY), (3, MAP_FAILED), (4, MAP_READY)]);
+        assert_eq!(tags(&ps), [1]);
+    }
+
+    #[test]
+    fn a_readback_that_finishes_late_is_still_collected() {
+        let mut ps: VecDeque<_> = [pending(1, MAP_PENDING), pending(2, MAP_PENDING)].into();
+        for _ in 0..STUCK_POLLS + 5 {
+            assert!(take_finished(&mut ps).is_empty());
+        }
+        assert_eq!(ps[0].polls, STUCK_POLLS + 5);
+        ps[0].state.store(MAP_READY, Ordering::Release);
+        let finished = take_finished(&mut ps);
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].0.tag, 1);
+        assert_eq!(tags(&ps), [2]);
     }
 
     #[test]

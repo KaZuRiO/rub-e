@@ -270,8 +270,9 @@ impl App for BenchApp {
         self.post
             .draw(&gpu.device, encoder, view, &self.grade, self.output);
 
-        // The collector ignores results it has already counted.
-        if let Some(timings) = &stats.gpu {
+        // Every result, not just the newest: several can arrive at once. The
+        // collector ignores those it has already counted.
+        for timings in stats.gpu_arrived {
             self.collector.timings(timings);
         }
         if let Err(err) = self.collector.frame_rendered(

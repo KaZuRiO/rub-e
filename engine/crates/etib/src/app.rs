@@ -78,7 +78,12 @@ pub struct FrameStats<'a> {
     /// back without waiting, so they trail the frame in flight by a few frames:
     /// [`GpuTimings::tag`] is the [`frame_index`](Self::frame_index) of the
     /// frame that was measured.
-    pub gpu: Option<GpuTimings>,
+    pub gpu: Option<&'a GpuTimings>,
+    /// Every GPU result that arrived since the previous frame, oldest first;
+    /// [`gpu`](Self::gpu) only shows the newest. The GPU can finish several
+    /// frames between two of these, so code that must see each measured frame
+    /// (a benchmark, a profiler) reads this rather than `gpu`.
+    pub gpu_arrived: &'a [GpuTimings],
 }
 
 /// The longest step [`App::update`] is ever handed, in seconds.
@@ -164,6 +169,7 @@ where
         fps: 0.0,
         last_fps_log: Instant::now(),
         last_gpu: None,
+        gpu_arrived: Vec::new(),
         failure: None,
     };
 
@@ -197,6 +203,9 @@ struct Runner<A, F> {
     last_fps_log: Instant,
     /// The newest GPU timings read back so far.
     last_gpu: Option<GpuTimings>,
+    /// GPU results not yet shown to the app: a frame whose surface could not
+    /// be acquired keeps them for the next one.
+    gpu_arrived: Vec<GpuTimings>,
     /// Why startup stopped, for `run` to return once the loop has exited.
     failure: Option<anyhow::Error>,
 }
@@ -213,8 +222,9 @@ where
         };
 
         // Never blocks: only what the GPU has already finished comes back.
-        if let Some(latest) = state.gpu.device.poll_timings().pop() {
-            self.last_gpu = Some(latest);
+        self.gpu_arrived.extend(state.gpu.device.poll_timings());
+        if let Some(latest) = self.gpu_arrived.last() {
+            self.last_gpu = Some(latest.clone());
         }
 
         let now = Instant::now();
@@ -270,7 +280,8 @@ where
             frame_index: self.frame_index,
             surface_size: state.gpu.size(),
             backend: state.gpu.device.backend(),
-            gpu: self.last_gpu.clone(),
+            gpu: self.last_gpu.as_ref(),
+            gpu_arrived: &self.gpu_arrived,
         };
 
         let mut encoder = state
@@ -283,6 +294,7 @@ where
             view: frame.view(),
             stats,
         });
+        self.gpu_arrived.clear();
 
         state.gpu.device.submit(encoder);
         frame.present(&state.gpu.device);
@@ -472,8 +484,10 @@ mod tests {
             frame_index: 9,
             surface_size: (1, 1),
             backend: "test",
-            gpu: Some(timings.clone()),
+            gpu: Some(&timings),
+            gpu_arrived: std::slice::from_ref(&timings),
         };
-        assert_eq!(stats.gpu, Some(timings));
+        assert_eq!(stats.gpu, Some(&timings));
+        assert_eq!(stats.gpu_arrived, std::slice::from_ref(&timings));
     }
 }
