@@ -666,7 +666,7 @@ submission per frame — the scene records into the frame's encoder.
 |---|---|---|
 | `Camera` | the application | Plain maths, no GPU. `advance_frame()` once a frame; it remembers last frame's matrix for `prev_view_proj` |
 | `CameraController` | the application | Told which way to `Move`, how far the mouse went, how far the wheel turned; which keys mean what is the application's call |
-| Static cubes | the `Scene`, from construction | Sorted into 32×32 XZ chunks on the CPU once; none at all means no culling buffers are created |
+| Static cubes | the `Scene`, from construction | Sorted into 32×32 XZ chunks on the CPU once; a cube on the grid whose six neighbours are all occupied is buried and never uploaded (`StaticWorld`, kept per chunk for a future edit API); none at all means no culling buffers are created |
 | Dynamic models | the `Scene`, by id | Slots are reused behind generational `DynamicId`s, so a removed model's id reaches nothing; a fixed capacity in cubes, set at construction |
 | Skybox | the `Scene`, optional | A `.hdr` is decoded on the CPU, projected onto a `TextureCube` by a compute pass at load time, then sampled linearly |
 
@@ -934,6 +934,7 @@ the binaries with `include_bytes!` so nothing has to be found at runtime.
 | `crates/etib-scene/src/cube.rs` | The cube mesh, `Vertex`, `CubeRaw`, `StaticCubeRaw` and its colour packing |
 | `crates/etib-scene/src/model.rs` | `.model` files: `ModelCube`, `parse_model`, `load_model`, `save_model` |
 | `crates/etib-scene/src/dynamic.rs` | `DynamicModel`, and the slots the scene keeps them in |
+| `crates/etib-scene/src/static_world.rs` | `StaticWorld`: the static cubes by chunk on the CPU, which places are occupied, which cubes are exposed |
 | `crates/etib-scene/src/culling.rs` | Chunking on the CPU, the two culling passes, the static cubes' buffers |
 | `crates/etib-scene/src/skybox.rs` | `.hdr` decoding, the equirectangular projection, the skybox pass |
 | `crates/etib-scene/src/shaders/` | `cube.wgsl`, `static_cube.wgsl`, `shading.wgsl`, `cull.wgsl`, `chunk_cull.wgsl`, `skybox.wgsl`, `equirectangular.wgsl` |

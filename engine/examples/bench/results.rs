@@ -15,6 +15,8 @@ pub struct ScenarioInfo {
     pub warmup_frames: u32,
     pub measured_frames: u32,
     pub generated_cubes: u32,
+    /// Static cubes sent to the GPU: the exposed ones, once buried cubes are
+    /// dropped. Runs saved before that (commit ca8c483) recorded every cube.
     pub kept_cubes: u32,
 }
 

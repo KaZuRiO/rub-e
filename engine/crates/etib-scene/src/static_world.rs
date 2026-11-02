@@ -30,9 +30,18 @@ const NEIGHBOURS: [IVec3; 6] = [
     IVec3::NEG_Z,
 ];
 
-/// The place on the integer grid `p` sits on, if every coordinate is within
-/// [`GRID_TOLERANCE`] of an integer.
+/// Past this, in either direction, an f32 no longer holds every integer, so
+/// there is no grid to sit on.
+const GRID_LIMIT: f32 = 16_777_216.0; // 2^24
+
+/// The place on the integer grid `p` sits on, if every coordinate is finite,
+/// within [`GRID_LIMIT`], and within [`GRID_TOLERANCE`] of an integer. A NaN
+/// or infinite coordinate is never on it, so such a cube neither occupies a
+/// place nor buries another.
 pub(crate) fn grid_position(p: Vec3) -> Option<IVec3> {
+    if !p.is_finite() || p.abs().max_element() >= GRID_LIMIT {
+        return None;
+    }
     let rounded = p.round();
     #[expect(
         clippy::cast_possible_truncation,
@@ -179,6 +188,42 @@ mod tests {
             .into_iter()
             .map(|p| p.round().as_ivec3())
             .collect()
+    }
+
+    #[test]
+    fn only_finite_coordinates_within_float_precision_are_on_the_grid() {
+        assert_eq!(
+            grid_position(Vec3::new(1.0, -2.0, 3.0)),
+            Some(IVec3::new(1, -2, 3))
+        );
+        for p in [
+            Vec3::new(f32::NAN, 5.0, 5.0),
+            Vec3::new(5.0, f32::NAN, 5.0),
+            Vec3::new(5.0, 5.0, f32::NAN),
+            Vec3::new(f32::INFINITY, 5.0, 5.0),
+            Vec3::new(5.0, f32::NEG_INFINITY, 5.0),
+            // Past 2^24 an f32 no longer holds every integer.
+            Vec3::new(1.0e10, 5.0, 5.0),
+            Vec3::new(5.0, 5.0, -3.0e7),
+        ] {
+            assert_eq!(grid_position(p), None, "{p}");
+        }
+    }
+
+    #[test]
+    fn a_cube_with_a_bad_coordinate_neither_occupies_nor_buries() {
+        // The NaN cube would land on (0, 1, 1) if it were put on the grid,
+        // and the 1e10 one next to i32::MAX, where looking at its neighbour
+        // would overflow.
+        let mut cubes = block(IVec3::ZERO, 3);
+        cubes.retain(|c| c.position != Vec3::new(0.0, 1.0, 1.0));
+        cubes.push(cube_at(Vec3::new(f32::NAN, 1.0, 1.0)));
+        cubes.push(cube_at(Vec3::new(1.0e10, 0.0, 0.0)));
+        let world = StaticWorld::from_cubes(&cubes);
+        assert!(!world.is_occupied(IVec3::new(0, 1, 1)));
+        // The 26 placed cubes, now all exposed through the hole, plus the two
+        // loose ones.
+        assert_eq!(exposed_positions(&world).len(), 26 + 2);
     }
 
     #[test]
