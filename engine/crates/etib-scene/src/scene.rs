@@ -424,6 +424,26 @@ mod tests {
         assert_eq!(cubes_kept(&device, &cubes, &mut camera), 2);
     }
 
+    /// The planes follow the scene's own aspect from the first frame: a cube
+    /// only a wide view takes in is kept by a wide scene, even with a camera
+    /// built square.
+    #[test]
+    fn culling_follows_the_scene_aspect() {
+        let Some(device) = device() else { return };
+        // About 6.5 units off-axis is the edge of a square view at this
+        // distance; a 4:1 view reaches about 26.
+        let cubes = [white_cube(15.0, 0.0, 0.0)];
+        let mut scene = Scene::new(&device, &cubes, 1, 128, 32);
+        let mut camera = camera();
+        assert_eq!(camera.aspect, 1.0);
+
+        let mut encoder = device.encoder("test");
+        scene.render(&device, &mut encoder, &mut camera);
+        finish(&device, encoder);
+        let statics = scene.statics.as_ref().expect("the scene has static cubes");
+        assert_eq!(statics.draw.read_back(&device)[0].instance_count, 1);
+    }
+
     #[test]
     fn resizing_reports_a_new_target() {
         let Some(device) = device() else { return };

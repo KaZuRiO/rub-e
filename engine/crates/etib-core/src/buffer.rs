@@ -454,13 +454,22 @@ fn read_raw(device: &Device, buffer: &wgpu::Buffer) -> Vec<u8> {
     device.raw_queue().submit([encoder.finish()]);
 
     let slice = staging.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |result| {
-        result.expect("mapping a read-back buffer");
+    // The callback only reports; the test fails on this thread, after the poll,
+    // rather than inside wgpu's callback.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        // The receiver outlives the poll below, so the send cannot fail.
+        let _ = sender.send(result);
     });
     device
         .raw()
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("device lost while reading a buffer back");
+    match receiver.try_recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("mapping a read-back buffer failed: {error}"),
+        Err(_) => panic!("a read-back buffer was not mapped after waiting for the GPU"),
+    }
     let bytes = slice
         .get_mapped_range()
         .expect("reading a mapped read-back buffer")

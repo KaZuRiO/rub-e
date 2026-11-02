@@ -381,6 +381,18 @@ mod tests {
         assert!(distances(&planes, Vec3::new(-5.0, 0.0, 0.0))[4] < 0.0);
     }
 
+    /// The near plane is the -1..1 convention's, about half way to `znear`:
+    /// looser than wgpu's own. Moving it to `znear` would cull what the
+    /// culling shaders always kept, so this pins it with a point rather than
+    /// with the formula.
+    #[test]
+    fn the_near_plane_keeps_what_lies_just_short_of_znear() {
+        let cam = camera(Projection::Perspective { fovy: 60.0 });
+        let planes = frustum_planes(cam.view_proj());
+        // Straight ahead (+X) at three quarters of znear (0.1).
+        assert!(distances(&planes, Vec3::new(0.075, 0.0, 0.0))[4] >= 0.0);
+    }
+
     #[test]
     fn each_frame_carries_its_frustum() {
         let mut cam = camera(Projection::Perspective { fovy: 60.0 });
