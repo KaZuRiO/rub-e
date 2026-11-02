@@ -1,7 +1,7 @@
 //! The cube every instance draws, and what each instance says about it.
 
 use etib_core::{StepMode, VertexAttribute, VertexFormat, VertexLayout};
-use glam::{Mat4, Vec4};
+use glam::{Mat4, Vec3, Vec4};
 
 /// One corner of the cube mesh. Mirrors `VertexInput` in `cube.wgsl`.
 #[repr(C)]
@@ -148,10 +148,62 @@ impl CubeRaw {
     };
 }
 
+/// One static cube as the GPU sees it: 16 bytes rather than [`CubeRaw`]'s 80.
+/// Static cubes are unit cubes on the axes, so a position is all the
+/// transform they need. Mirrors `StaticCube` in `cull.wgsl` and
+/// `static_cube.wgsl`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct StaticCubeRaw {
+    /// The cube's centre, in world units.
+    pub position: [f32; 3],
+    /// sRGB-encoded RGBA, 8 bits each, red in the low byte; alpha is 255.
+    /// See [`StaticCubeRaw::new`].
+    pub color: u32,
+}
+
+impl StaticCubeRaw {
+    /// A cube at `position`, coloured `color` in linear RGB. Each channel is
+    /// clamped to 0..1 and stored sRGB-encoded on 8 bits, which keeps dark
+    /// colours from banding as linear 8-bit values would.
+    pub fn new(position: Vec3, color: Vec3) -> Self {
+        Self {
+            position: position.to_array(),
+            color: pack_srgb8(color),
+        }
+    }
+}
+
+/// `linear` clamped to 0..1, sRGB-encoded and rounded to 8 bits per channel,
+/// red in the low byte and an opaque alpha in the high one: what WGSL's
+/// `unpack4x8unorm` reads back.
+pub(crate) fn pack_srgb8(linear: Vec3) -> u32 {
+    let [r, g, b] = linear.to_array().map(|channel| u32::from(srgb8(channel)));
+    r | g << 8 | b << 16 | 0xFF << 24
+}
+
+/// One linear channel as an sRGB-encoded byte.
+fn srgb8(linear: f32) -> u8 {
+    let linear = if linear.is_nan() {
+        0.0
+    } else {
+        linear.clamp(0.0, 1.0)
+    };
+    let encoded = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "clamped to 0..1 above, so the rounded value is 0..=255"
+    )]
+    let byte = (encoded * 255.0).round() as u8;
+    byte
+}
+
 #[cfg(test)]
 mod tests {
-    use glam::Vec3;
-
     use super::*;
 
     #[test]
@@ -189,6 +241,43 @@ mod tests {
                 facing.dot(normal) > 0.0,
                 "triangle {triangle:?} faces inwards"
             );
+        }
+    }
+
+    /// The sRGB decoding the static cube shader does.
+    fn srgb_to_linear(encoded: f32) -> f32 {
+        if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    #[test]
+    fn static_instances_are_sixteen_bytes() {
+        assert_eq!(size_of::<StaticCubeRaw>(), 16);
+        assert_eq!(std::mem::offset_of!(StaticCubeRaw, color), 12);
+        let raw = StaticCubeRaw::new(Vec3::new(1.0, 2.0, 3.0), Vec3::ONE);
+        assert_eq!(raw.position, [1.0, 2.0, 3.0]);
+        assert_eq!(raw.color, 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn colours_pack_as_srgb_bytes() {
+        assert_eq!(pack_srgb8(Vec3::ONE), 0xFFFF_FFFF);
+        assert_eq!(pack_srgb8(Vec3::ZERO), 0xFF00_0000);
+        assert_eq!(pack_srgb8(Vec3::new(1.0, 0.0, 0.0)), 0xFF00_00FF);
+        assert_eq!(pack_srgb8(Vec3::new(0.0, 0.0, 1.0)), 0xFFFF_0000);
+        // Out of range is clamped.
+        assert_eq!(pack_srgb8(Vec3::new(2.0, -1.0, 0.0)), 0xFF00_00FF);
+    }
+
+    #[test]
+    fn dark_colours_survive_the_round_trip() {
+        for v in [0.002, 0.01, 0.05, 0.2, 0.5, 0.9] {
+            let byte = pack_srgb8(Vec3::splat(v)) & 0xFF;
+            let back = srgb_to_linear(byte as f32 / 255.0);
+            assert!((back - v).abs() <= v * 0.05 + 0.0005, "{v} -> {back}");
         }
     }
 

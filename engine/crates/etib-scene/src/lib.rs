@@ -42,7 +42,7 @@ mod scene;
 mod skybox;
 
 pub use camera::{Camera, CameraController, CameraMode, CameraRaw, Move, Projection};
-pub use cube::{CubeRaw, INDICES, VERTICES, Vertex};
+pub use cube::{CubeRaw, INDICES, StaticCubeRaw, VERTICES, Vertex};
 pub use dynamic::{DynamicId, DynamicModel};
 pub use error::{Error, Result};
 pub use model::{ModelCube, load_model, parse_model, save_model};
