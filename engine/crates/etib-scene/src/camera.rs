@@ -5,7 +5,7 @@
 //! keyboard — [`CameraController`] is told which way to [`Move`], and the
 //! application decides which keys mean that.
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 
 /// How the camera projects the world.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,6 +60,10 @@ pub struct CameraRaw {
     pub inv_proj: [[f32; 4]; 4],
     /// Last frame's `view_proj`; this frame's on the first.
     pub prev_view_proj: [[f32; 4]; 4],
+    /// The six frustum planes of `view_proj`, normalised, in the order left,
+    /// right, bottom, top, near, far; a point is inside when
+    /// `dot(xyz, p) + w >= 0` for all six.
+    pub frustum: [[f32; 4]; 6],
 }
 
 impl Camera {
@@ -122,6 +126,7 @@ impl Camera {
             inv_view: view.inverse().to_cols_array_2d(),
             inv_proj: proj.inverse().to_cols_array_2d(),
             prev_view_proj: prev.to_cols_array_2d(),
+            frustum: frustum_planes(view_proj).map(|plane| plane.to_array()),
         }
     }
 
@@ -289,6 +294,23 @@ impl CameraController {
     }
 }
 
+/// The frustum planes of `view_proj`, normalised, in the order left, right,
+/// bottom, top, near, far. Each is `(normal, distance)`, the normal pointing
+/// inwards.
+///
+/// The near plane is `w + z >= 0`, the -1..1 depth convention, which lies
+/// behind wgpu's real 0..1 near plane: it keeps a little more than it must,
+/// never less. Kept as the culling shaders always had it.
+pub(crate) fn frustum_planes(view_proj: Mat4) -> [Vec4; 6] {
+    let (x, y, z, w) = (
+        view_proj.row(0),
+        view_proj.row(1),
+        view_proj.row(2),
+        view_proj.row(3),
+    );
+    [w + x, w - x, w + y, w - y, w + z, w - z].map(|plane| plane / plane.truncate().length())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,7 +329,63 @@ mod tests {
 
     #[test]
     fn raw_layout_matches_the_shaders() {
-        assert_eq!(size_of::<CameraRaw>(), 256);
+        assert_eq!(size_of::<CameraRaw>(), 352);
+    }
+
+    /// The signed distance of `p` to each of `planes`, positive inside.
+    fn distances(planes: &[Vec4; 6], p: Vec3) -> [f32; 6] {
+        planes.map(|plane| plane.truncate().dot(p) + plane.w)
+    }
+
+    #[test]
+    fn frustum_planes_match_the_shader_formula() {
+        // The rows the culling shaders combined before the planes moved here.
+        let m = camera(Projection::Perspective { fovy: 45.0 }).view_proj();
+        let (r0, r1, r2, r3) = (m.row(0), m.row(1), m.row(2), m.row(3));
+        let expected = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 + r2, r3 - r2]
+            .map(|p| p / p.truncate().length());
+        for (got, want) in frustum_planes(m).iter().zip(expected) {
+            assert!(got.abs_diff_eq(want, 1e-5), "{got} != {want}");
+        }
+    }
+
+    #[test]
+    fn frustum_planes_are_normalised() {
+        let m = camera(Projection::Orthographic { scale: 3.0 }).view_proj();
+        for plane in frustum_planes(m) {
+            assert!((plane.truncate().length() - 1.0).abs() < 1e-5, "{plane}");
+        }
+    }
+
+    #[test]
+    fn the_frustum_holds_what_the_camera_looks_at() {
+        for projection in [
+            Projection::Perspective { fovy: 60.0 },
+            Projection::Orthographic { scale: 10.0 },
+        ] {
+            let planes = frustum_planes(camera(projection).view_proj());
+            // The camera sits at the origin and looks down +X.
+            let ahead = distances(&planes, Vec3::new(10.0, 0.0, 0.0));
+            assert!(ahead.iter().all(|d| *d >= 0.0), "{projection:?}: {ahead:?}");
+            // Far off to the camera's left (-Z, with +Y up and +X ahead).
+            let aside = distances(&planes, Vec3::new(10.0, 0.0, -500.0));
+            assert!(aside[0] < 0.0, "{projection:?}: {aside:?}");
+            let beyond = distances(&planes, Vec3::new(500.0, 0.0, 0.0));
+            assert!(beyond[5] < 0.0, "{projection:?}: {beyond:?}");
+        }
+    }
+
+    #[test]
+    fn the_perspective_frustum_drops_what_is_behind() {
+        let planes = frustum_planes(camera(Projection::Perspective { fovy: 60.0 }).view_proj());
+        assert!(distances(&planes, Vec3::new(-5.0, 0.0, 0.0))[4] < 0.0);
+    }
+
+    #[test]
+    fn each_frame_carries_its_frustum() {
+        let mut cam = camera(Projection::Perspective { fovy: 60.0 });
+        let expected = frustum_planes(cam.view_proj()).map(|plane| plane.to_array());
+        assert_eq!(cam.advance_frame().frustum, expected);
     }
 
     #[test]
