@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
-use etib_core::{Acquired, Encoder, Hdr, Instance, TextureView, Vsync};
+use etib_core::{Acquired, Encoder, GpuTimings, Hdr, Instance, TextureView, Vsync};
 use log::{debug, error, info, trace};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
@@ -73,6 +73,17 @@ pub struct FrameStats<'a> {
     pub surface_size: (u32, u32),
     /// The graphics backend in use, formatted for display.
     pub backend: &'a str,
+    /// The most recent per-pass GPU timings to arrive, or `None` until one has
+    /// (and always, on a device without timestamp queries). Results are read
+    /// back without waiting, so they trail the frame in flight by a few frames:
+    /// [`GpuTimings::tag`] is the [`frame_index`](Self::frame_index) of the
+    /// frame that was measured.
+    pub gpu: Option<&'a GpuTimings>,
+    /// Every GPU result that arrived since the previous frame, oldest first;
+    /// [`gpu`](Self::gpu) only shows the newest. The GPU can finish several
+    /// frames between two of these, so code that must see each measured frame
+    /// (a benchmark, a profiler) reads this rather than `gpu`.
+    pub gpu_arrived: &'a [GpuTimings],
 }
 
 /// The longest step [`App::update`] is ever handed, in seconds.
@@ -114,10 +125,10 @@ pub trait App {
     /// never more than [`MAX_DT`].
     fn update(&mut self, _dt: f32) {}
 
-    /// Whether the application wants the frame loop to end. Asked after every
-    /// [`update`](Self::update) and every window event; returning `true` exits
-    /// the loop, drops the application where it stands, and returns from
-    /// [`run`].
+    /// Return `true` to leave the frame loop, as Escape or closing the window
+    /// would. Checked after every frame, and also after every
+    /// [`update`](Self::update) and every window event; the loop exits, the
+    /// application is dropped where it stands, and [`run`] returns.
     fn exit_requested(&self) -> bool {
         false
     }
@@ -157,6 +168,8 @@ where
         frame_index: 0,
         fps: 0.0,
         last_fps_log: Instant::now(),
+        last_gpu: None,
+        gpu_arrived: Vec::new(),
         failure: None,
     };
 
@@ -188,6 +201,11 @@ struct Runner<A, F> {
     frame_index: u64,
     fps: f32,
     last_fps_log: Instant,
+    /// The newest GPU timings read back so far.
+    last_gpu: Option<GpuTimings>,
+    /// GPU results not yet shown to the app: a frame whose surface could not
+    /// be acquired keeps them for the next one.
+    gpu_arrived: Vec<GpuTimings>,
     /// Why startup stopped, for `run` to return once the loop has exited.
     failure: Option<anyhow::Error>,
 }
@@ -202,6 +220,12 @@ where
         let Some(state) = self.state.as_mut() else {
             return;
         };
+
+        // Never blocks: only what the GPU has already finished comes back.
+        self.gpu_arrived.extend(state.gpu.device.poll_timings());
+        if let Some(latest) = self.gpu_arrived.last() {
+            self.last_gpu = Some(latest.clone());
+        }
 
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_frame);
@@ -256,19 +280,31 @@ where
             frame_index: self.frame_index,
             surface_size: state.gpu.size(),
             backend: state.gpu.device.backend(),
+            gpu: self.last_gpu.as_ref(),
+            gpu_arrived: &self.gpu_arrived,
         };
 
-        let mut encoder = state.gpu.device.encoder("frame encoder");
+        let mut encoder = state
+            .gpu
+            .device
+            .timed_encoder("frame encoder", self.frame_index);
         state.app.render(Frame {
             gpu: &state.gpu,
             encoder: &mut encoder,
             view: frame.view(),
             stats,
         });
+        self.gpu_arrived.clear();
 
         state.gpu.device.submit(encoder);
         frame.present(&state.gpu.device);
         trace!("frame {} presented", self.frame_index);
+
+        if state.app.exit_requested() {
+            info!("the application asked to exit");
+            event_loop.exit();
+            return;
+        }
 
         // Animation is continuous, so keep asking for the next frame.
         state.gpu.window.request_redraw();
@@ -413,6 +449,8 @@ where
 mod tests {
     use std::time::Duration;
 
+    use etib_core::PassTime;
+
     use super::*;
 
     #[test]
@@ -429,5 +467,27 @@ mod tests {
             fn render(&mut self, _: Frame<'_>) {}
         }
         assert!(!Nothing.exit_requested());
+    }
+
+    #[test]
+    fn frame_stats_carry_the_latest_gpu_timings() {
+        let timings = GpuTimings {
+            tag: 7,
+            passes: vec![PassTime {
+                label: "scene".to_owned(),
+                ms: Some(1.5),
+            }],
+            total_ms: 1.5,
+        };
+        let stats = FrameStats {
+            fps: 60.0,
+            frame_index: 9,
+            surface_size: (1, 1),
+            backend: "test",
+            gpu: Some(&timings),
+            gpu_arrived: std::slice::from_ref(&timings),
+        };
+        assert_eq!(stats.gpu, Some(&timings));
+        assert_eq!(stats.gpu_arrived, std::slice::from_ref(&timings));
     }
 }

@@ -87,8 +87,9 @@ impl Instance {
 /// adapter offers.
 pub(crate) const STORAGE_BUFFERS_PER_STAGE: u32 = 8;
 
-/// The device everything in this crate runs on: no optional features, and the
-/// downlevel default limits except for the storage buffers per stage.
+/// The device everything in this crate runs on: no required features beyond
+/// `TIMESTAMP_QUERY`, taken when the adapter offers it, and the downlevel
+/// default limits except for the storage buffers per stage.
 ///
 /// Asking for the minimum rather than the adapter's own limits keeps the same
 /// binary working across backends, and a machine that cannot meet it is told
@@ -114,7 +115,7 @@ pub(crate) fn open_device(adapter: &wgpu::Adapter) -> Result<Device> {
 
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("etib device"),
-        required_features: wgpu::Features::empty(),
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
         required_limits,
         ..Default::default()
     }))

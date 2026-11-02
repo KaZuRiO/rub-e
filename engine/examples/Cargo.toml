@@ -58,6 +58,11 @@ path = "physics.rs"
 name = "sounds"
 path = "sounds.rs"
 
+# Measurement.
+[[bin]]
+name = "bench"
+path = "bench/main.rs"
+
 # A CLAP plugin rather than a program, for `instrument` to load: cargo leaves
 # a loadable library in target/<profile>/examples.
 [[example]]

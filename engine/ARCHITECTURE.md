@@ -52,7 +52,7 @@ Neither draws anything, so neither needs a device.
 
 | Crate | Owns | Deliberately does not know about |
 |---|---|---|
-| `etib-core` | Every GPU object, the swapchain, colour-space detection | winit, egui, the frame loop |
+| `etib-core` | Every GPU object, the swapchain, colour-space detection, per-pass GPU timing | winit, egui, the frame loop |
 | `etib` | The window, the frame loop, the `App` trait, the presentation passes | egui and cpal (behind the `ui` and `audio` features), what is being drawn or heard |
 | `etib-scene` | The camera and its controller, cube models, GPU frustum culling, the skybox, the `Scene` that draws them | windows, keyboards and the frame loop — the controller is told which way to `Move`; tone mapping, which is `PostProcess`'s job |
 | `etib-input` | Keyboard, mouse and gamepad state, fed from winit events and cleared once per frame | the GPU, the window, the frame loop and `App` — an application feeds it; gilrs, unless the `gamepad` feature is on |
@@ -91,8 +91,8 @@ etib::run(Config, build)                        crates/etib/src/app.rs
        ├─ Gpu::new -> Instance::open(window, w, h, hdr, vsync)
        │     ├─ create_surface
        │     ├─ request_adapter(HighPerformance, compatible surface)
-       │     ├─ request_device(no optional features, downlevel limits
-       │     │                 + 8 storage buffers per stage)
+       │     ├─ request_device(TIMESTAMP_QUERY if offered, downlevel
+       │     │                 limits + 8 storage buffers per stage)
        │     └─ Surface::new -> select_output() -> configure()
        │
        └─ build(&gpu) -> App          your pipelines are created here
@@ -106,8 +106,10 @@ what was being attempted as its context, so `main` exits non-zero.
 
 Two deliberate choices in there:
 
-- **No optional features, downlevel default limits plus storage buffers**
-  (`open_device` in `instance.rs`). Everything is the downlevel default except
+- **No *required* features, downlevel default limits plus storage buffers**
+  (`open_device` in `instance.rs`). `TIMESTAMP_QUERY` is the one exception, and
+  it is taken only when the adapter offers it: without it everything works as
+  before and only the GPU timings are absent. Everything is the downlevel default except
   `max_storage_buffers_per_shader_stage`, raised from 4 to 8: GPU culling binds
   five in a single compute stage. That is the minimum the engine needs rather
   than the adapter's own limits, so the same binary keeps working across
@@ -164,19 +166,28 @@ settings; reading such a file is the application's business.
                                          was just rebuilt — ask for another
                         Acquired::Fatal  unusable; shut down
   │
-  encoder = device.encoder("frame encoder")
+  device.poll_timings()         never blocks; keeps the newest result
+  encoder = device.timed_encoder("frame encoder", frame_index)
   app.render(Frame { gpu, encoder, view, stats })    ← all your passes go here
   │
   device.submit(encoder)        one command buffer for the whole frame
   frame.present(&device)
+  app.exit_requested()? -> exit
   window.request_redraw()       animation is continuous, so always ask again
 ```
 
 `ControlFlow::Poll` is set in `about_to_wait`: this animates continuously rather
 than only on input.
 
+The frame encoder is a timed one: where the device has `TIMESTAMP_QUERY`, each
+pass is bracketed by GPU timestamps and the results are read back without
+waiting. `FrameStats::gpu` holds the newest `GpuTimings` to arrive, which trails
+the frame in flight by a few frames (its `tag` is the `frame_index` it
+measured); it stays `None` without the feature. `Device::encoder()` is untimed.
+
 An application ends the loop by returning `true` from `App::exit_requested`,
-which the runner asks after every `update` and every window event. The
+which the runner asks after every `update`, every window event and every
+presented frame. The
 application is then dropped normally, so whatever it owns — its sound device,
 its connections — is closed on the way out.
 
