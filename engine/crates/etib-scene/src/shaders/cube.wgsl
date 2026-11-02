@@ -3,6 +3,7 @@ struct CameraUniform {
     inv_view: mat4x4<f32>,
     inv_proj: mat4x4<f32>,
     prev_view_proj: mat4x4<f32>,
+    frustum:        array<vec4<f32>, 6>,
 };
 
 struct VertexInput {

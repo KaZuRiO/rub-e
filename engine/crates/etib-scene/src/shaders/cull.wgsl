@@ -3,16 +3,8 @@ struct CameraUniform {
     inv_view: mat4x4<f32>,
     inv_proj: mat4x4<f32>,
     prev_view_proj: mat4x4<f32>,
+    frustum:        array<vec4<f32>, 6>,
 };
-
-struct Plane {
-    normal: vec3<f32>,
-    distance: f32,
-}
-
-struct Frustum {
-    planes: array<Plane, 6>,
-}
 
 struct AABB {
     min: vec3<f32>,
@@ -51,40 +43,13 @@ var<storage, read> cube_chunk_ids: array<u32>;
 @group(1) @binding(4)
 var<storage, read> chunk_visible: array<u32>;
 
-fn normalize_plane(v: vec4<f32>) -> Plane {
-    let len = length(v.xyz);
-    return Plane(v.xyz / len, v.w / len);
-}
-
-fn frustum_from_view_proj(view_proj: mat4x4<f32>) -> Frustum {
-    // Transpose to get rows as vectors
-    let m = transpose(view_proj);
-    let row0 = m[0];
-    let row1 = m[1];
-    let row2 = m[2];
-    let row3 = m[3];
-
-    var planes: array<Plane, 6>;
-    planes[0] = normalize_plane(row3 + row0); // Left
-    planes[1] = normalize_plane(row3 - row0); // Right
-    planes[2] = normalize_plane(row3 + row1); // Bottom
-    planes[3] = normalize_plane(row3 - row1); // Top
-    planes[4] = normalize_plane(row3 + row2); // Near
-    planes[5] = normalize_plane(row3 - row2); // Far
-    return Frustum(planes);
-}
-
-fn plane_distance(plane: Plane, point: vec3<f32>) -> f32 {
-    return dot(plane.normal, point) + plane.distance;
-}
-
-fn intersects_aabb(frustum: Frustum, aabb: AABB) -> bool {
+// Whether the box is at least partly inside the frustum planes the CPU
+// computed for this frame (left, right, bottom, top, near, far).
+fn intersects_aabb(aabb: AABB) -> bool {
     for (var i = 0; i < 6; i++) {
-        let plane = frustum.planes[i];
-        let px = select(aabb.min.x, aabb.max.x, plane.normal.x >= 0.0);
-        let py = select(aabb.min.y, aabb.max.y, plane.normal.y >= 0.0);
-        let pz = select(aabb.min.z, aabb.max.z, plane.normal.z >= 0.0);
-        if (plane_distance(plane, vec3<f32>(px, py, pz)) < 0.0) {
+        let plane = camera.frustum[i];
+        let p = select(aabb.min, aabb.max, plane.xyz >= vec3<f32>(0.0));
+        if (dot(plane.xyz, p) + plane.w < 0.0) {
             return false;
         }
     }
@@ -116,11 +81,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let instance = all_instances[index];
-    let frustum = frustum_from_view_proj(camera.view_proj);
     let aabb = get_aabb_from_instance(instance.model);
 
     // 2. Per-cube frustum culling
-    if (intersects_aabb(frustum, aabb)) {
+    if (intersects_aabb(aabb)) {
         let out_index = atomicAdd(&draw_cmd.instance_count, 1u);
         visible_instances[out_index] = instance;
     }

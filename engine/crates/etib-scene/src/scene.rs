@@ -378,6 +378,72 @@ mod tests {
         }
     }
 
+    /// How many static cubes survived culling in the frame `camera` sees.
+    fn cubes_kept(device: &Device, cubes: &[ModelCube], camera: &mut Camera) -> u32 {
+        let mut scene = Scene::new(device, cubes, 1, 64, 64);
+        let mut encoder = device.encoder("test");
+        scene.render(device, &mut encoder, camera);
+        finish(device, encoder);
+        let statics = scene.statics.as_ref().expect("the scene has static cubes");
+        statics.draw.read_back(device)[0].instance_count
+    }
+
+    #[test]
+    fn culling_keeps_only_cubes_in_view() {
+        let Some(device) = device() else { return };
+        let cubes = [
+            white_cube(0.0, 0.0, 0.0),     // in view
+            white_cube(1.0, 0.0, 0.0),     // in view
+            white_cube(0.0, 1.0, -3.0),    // in view
+            white_cube(25.0, 0.0, 0.0),    // right of the view, same chunk as those
+            white_cube(0.0, 5.0, 40.0),    // behind the eye
+            white_cube(-500.0, 0.0, 0.0),  // far to the left, in its own chunk
+            white_cube(0.0, 0.0, -2000.0), // past the far plane
+        ];
+        assert_eq!(cubes_kept(&device, &cubes, &mut camera()), 3);
+    }
+
+    #[test]
+    fn ortho_culling_keeps_only_cubes_in_the_box() {
+        let Some(device) = device() else { return };
+        let mut camera = Camera::new(
+            Vec3::new(0.0, 5.0, 10.0),
+            Vec3::ZERO,
+            Vec3::Y,
+            1.0,
+            Projection::Orthographic { scale: 5.0 },
+            0.1,
+            1000.0,
+        );
+        let cubes = [
+            white_cube(0.0, 0.0, 0.0),   // in the box
+            white_cube(1.0, 0.0, 0.0),   // in the box
+            white_cube(-50.0, 0.0, 0.0), // left of it, in its own chunk
+            white_cube(0.0, 60.0, 0.0),  // above it
+        ];
+        assert_eq!(cubes_kept(&device, &cubes, &mut camera), 2);
+    }
+
+    /// The planes follow the scene's own aspect from the first frame: a cube
+    /// only a wide view takes in is kept by a wide scene, even with a camera
+    /// built square.
+    #[test]
+    fn culling_follows_the_scene_aspect() {
+        let Some(device) = device() else { return };
+        // About 6.5 units off-axis is the edge of a square view at this
+        // distance; a 4:1 view reaches about 26.
+        let cubes = [white_cube(15.0, 0.0, 0.0)];
+        let mut scene = Scene::new(&device, &cubes, 1, 128, 32);
+        let mut camera = camera();
+        assert_eq!(camera.aspect, 1.0);
+
+        let mut encoder = device.encoder("test");
+        scene.render(&device, &mut encoder, &mut camera);
+        finish(&device, encoder);
+        let statics = scene.statics.as_ref().expect("the scene has static cubes");
+        assert_eq!(statics.draw.read_back(&device)[0].instance_count, 1);
+    }
+
     #[test]
     fn resizing_reports_a_new_target() {
         let Some(device) = device() else { return };
