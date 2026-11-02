@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use log::{debug, info};
+use log::{debug, error, info};
 
 use crate::encoder::Encoder;
 use crate::error::{Error, Result};
@@ -21,6 +21,9 @@ pub struct Device {
     info: Arc<DeviceInfo>,
     /// Present only when the device was opened with `TIMESTAMP_QUERY`.
     timer: Option<Arc<Mutex<Timer>>>,
+    /// Why the device was lost, once it has been. A lost device turns every
+    /// later creation into an invalid object without any validation error.
+    lost: Arc<Mutex<Option<String>>>,
 }
 
 struct DeviceInfo {
@@ -46,6 +49,22 @@ impl Device {
             log::error!("uncaptured GPU error: {error}");
         }));
 
+        let lost = Arc::new(Mutex::new(None));
+        let lost_in_callback = Arc::clone(&lost);
+        device.set_device_lost_callback(move |reason, message| {
+            if reason == wgpu::DeviceLostReason::Destroyed {
+                debug!("GPU device destroyed: {message}");
+            } else {
+                error!(
+                    "GPU device lost ({reason:?}): {message}. Everything created on it from \
+                     now on is invalid"
+                );
+            }
+            *lost_in_callback
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(format!("{reason:?}: {message}"));
+        });
+
         let info = DeviceInfo {
             backend: format!("{:?}", adapter_info.backend),
             adapter: adapter_info.name,
@@ -62,6 +81,7 @@ impl Device {
             queue,
             info: Arc::new(info),
             timer,
+            lost,
         }
     }
 
@@ -169,6 +189,14 @@ impl Device {
         if let Some(error) = pollster::block_on(scope.pop()) {
             panic!("{what} '{label}' is invalid: {error}");
         }
+        if let Some(reason) = self
+            .lost
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            panic!("{what} '{label}' cannot be made: the GPU device was lost ({reason})");
+        }
         created
     }
 
@@ -195,5 +223,56 @@ impl std::fmt::Debug for Device {
             .field("adapter", &self.info.adapter)
             .field("backend", &self.info.backend)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::StorageBuffer;
+    use crate::test_util;
+
+    /// Metal allows 32 timestamp sample buffers per process. A device that
+    /// took one per timing slot let only four devices open before the next was
+    /// lost, and every resource made on it after was invalid.
+    #[test]
+    fn more_devices_than_metal_has_counters_for_still_work() {
+        let Some(first) = test_util::device() else {
+            return;
+        };
+        let mut devices = vec![first];
+        for _ in 1..8 {
+            devices.push(Device::open_headless().expect("opening another device"));
+        }
+        for device in &devices {
+            assert_eq!(
+                device.gpu_timing_available(),
+                devices[0].gpu_timing_available()
+            );
+            // Panics on a lost device: its buffers are created invalid.
+            StorageBuffer::<u32>::from_slice(device, "probe", &[1, 2, 3]);
+        }
+    }
+
+    /// A lost device makes every later creation fail without a validation
+    /// error, so `checked` would let a broken shader through in silence.
+    #[test]
+    fn a_lost_device_is_reported_when_something_is_created_on_it() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        device.raw().destroy();
+        let _ = device.raw().poll(wgpu::PollType::wait_indefinitely());
+        let message = test_util::panic_message(|| {
+            device.checked("buffer", "after loss", |raw| {
+                raw.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("after loss"),
+                    size: 16,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                })
+            });
+        });
+        assert!(message.contains("device was lost"), "{message}");
     }
 }

@@ -4,8 +4,10 @@
 //! milliseconds per labelled pass, using the timestamp period the device
 //! reports.
 //!
-//! A [`Timer`] owns a few slots, each a query set plus the buffers its
-//! timestamps are copied through. A timed encoder takes a slot, its passes
+//! A [`Timer`] owns a few slots, each a range of one shared query set plus
+//! the buffers its timestamps are copied through. One query set rather than
+//! one per slot: Metal allows only 32 timestamp sample buffers in a process,
+//! and running out loses the device. A timed encoder takes a slot, its passes
 //! write their begin and end timestamps into it, and `Device::submit` copies
 //! them out and starts mapping the result. The map is only ever polled, never
 //! waited on, so the slot comes back to the pool a frame or two later, once
@@ -25,6 +27,14 @@ pub(crate) const MAX_TIMED_PASSES: u32 = 32;
 /// later poll sees its readback finished, so without vsync, with the CPU a few
 /// frames ahead of the GPU, each one stays busy for several frames.
 pub(crate) const TIMING_SLOTS: usize = 8;
+
+/// [`TIMING_SLOTS`] as the `u32` query indices are counted in.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a constant of 8, checked to fit by the const assertion below"
+)]
+const SLOT_COUNT: u32 = TIMING_SLOTS as u32;
+const _: () = assert!(TIMING_SLOTS <= u32::MAX as usize);
 
 /// Polls after which a readback that has not finished is reported as stuck.
 /// It keeps its slot, which cannot be reused while the map is pending, but no
@@ -106,20 +116,19 @@ pub(crate) fn to_timings(tag: u64, labels: &[String], ticks: &[u64], period_ns: 
 
 /// The GPU objects of one measurement slot.
 struct Slot {
+    /// The query set every slot shares; this one writes from `first` on.
     query_set: wgpu::QuerySet,
+    first: u32,
     resolve: wgpu::Buffer,
     readback: wgpu::Buffer,
 }
 
 impl Slot {
-    fn new(device: &wgpu::Device, index: usize) -> Self {
+    fn new(device: &wgpu::Device, query_set: &wgpu::QuerySet, index: u32) -> Self {
         let size = u64::from(TIMESTAMPS_PER_SLOT) * TIMESTAMP_BYTES as u64;
         Self {
-            query_set: device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some(&format!("etib timing queries {index}")),
-                ty: wgpu::QueryType::Timestamp,
-                count: TIMESTAMPS_PER_SLOT,
-            }),
+            query_set: query_set.clone(),
+            first: index * TIMESTAMPS_PER_SLOT,
             resolve: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("etib timing resolve {index}")),
                 size,
@@ -185,9 +194,14 @@ pub(crate) struct Timer {
 
 impl Timer {
     pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("etib timing queries"),
+            ty: wgpu::QueryType::Timestamp,
+            count: SLOT_COUNT * TIMESTAMPS_PER_SLOT,
+        });
         Self {
-            slots: (0..TIMING_SLOTS)
-                .map(|i| Arc::new(Slot::new(device, i)))
+            slots: (0..SLOT_COUNT)
+                .map(|i| Arc::new(Slot::new(device, &query_set, i)))
                 .collect(),
             free: (0..TIMING_SLOTS).rev().collect(),
             pending: VecDeque::new(),
@@ -298,7 +312,8 @@ impl Lease {
             return None;
         };
         self.labels.push(label.to_owned());
-        Some((2 * pass, 2 * pass + 1))
+        let first = self.slot.first + 2 * pass;
+        Some((first, first + 1))
     }
 
     pub(crate) fn query_set(&self) -> &wgpu::QuerySet {
@@ -313,7 +328,13 @@ impl Lease {
         }
         let count = u32::try_from(self.labels.len()).unwrap_or(MAX_TIMED_PASSES) * 2;
         let bytes = slot_bytes(self.labels.len());
-        encoder.resolve_query_set(&self.slot.query_set, 0..count, &self.slot.resolve, 0);
+        let first = self.slot.first;
+        encoder.resolve_query_set(
+            &self.slot.query_set,
+            first..first + count,
+            &self.slot.resolve,
+            0,
+        );
         encoder.copy_buffer_to_buffer(&self.slot.resolve, 0, &self.slot.readback, 0, bytes);
         true
     }

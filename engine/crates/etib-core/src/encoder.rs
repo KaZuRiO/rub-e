@@ -415,6 +415,41 @@ mod tests {
         assert!(got.len() <= TIMING_SLOTS);
     }
 
+    /// Every slot has its own range of timestamps: none overwrites another's.
+    #[test]
+    fn every_slot_reports_its_own_passes() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        if !device.gpu_timing_available() {
+            return;
+        }
+        // Slot `tag` gets `tag + 1` passes, so each result says which it was.
+        for tag in 0..TIMING_SLOTS as u64 {
+            let mut encoder = device.timed_encoder("slot", tag);
+            for _ in 0..=tag {
+                drop(encoder.compute_pass("p"));
+            }
+            device.submit(encoder);
+        }
+        let mut got = Vec::new();
+        for _ in 0..100 {
+            if got.len() == TIMING_SLOTS {
+                break;
+            }
+            got.extend(wait_for_all(&device));
+        }
+        assert_eq!(got.len(), TIMING_SLOTS);
+        for t in got {
+            assert_eq!(t.passes.len() as u64, t.tag + 1, "tag {}", t.tag);
+            assert!(
+                t.passes.iter().all(|p| p.ms.is_some()),
+                "tag {}: {t:?}",
+                t.tag
+            );
+        }
+    }
+
     #[test]
     fn a_plain_encoder_is_never_timed() {
         let Some(device) = test_util::device() else {
