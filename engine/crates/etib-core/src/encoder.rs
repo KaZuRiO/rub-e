@@ -374,8 +374,8 @@ mod tests {
         assert_eq!(t.tag, 42);
         let labels: Vec<_> = t.passes.iter().map(|p| p.label.as_str()).collect();
         assert_eq!(labels, ["a", "b"]);
-        assert!(t.passes.iter().all(|p| p.ms >= 0.0));
-        assert!(t.total_ms >= t.passes.iter().map(|p| p.ms).fold(0.0, f32::max));
+        assert!(t.passes.iter().all(|p| p.ms.is_some()));
+        assert!(t.total_ms >= t.passes.iter().filter_map(|p| p.ms).fold(0.0, f32::max));
     }
 
     #[test]

@@ -323,7 +323,10 @@ impl App for HelloApp {
             let passes: Vec<String> = timings
                 .passes
                 .iter()
-                .map(|pass| format!("{} {:.2} ms", pass.label, pass.ms))
+                .map(|pass| match pass.ms {
+                    Some(ms) => format!("{} {ms:.2} ms", pass.label),
+                    None => format!("{} n/a", pass.label),
+                })
                 .collect();
             info!("gpu: {}", passes.join(", "));
         }

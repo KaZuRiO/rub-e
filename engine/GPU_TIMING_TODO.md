@@ -21,15 +21,24 @@ Les runs faits avant ces corrections perdaient la moitié des frames, surtout
 celles où le GPU était en retard : leurs chiffres sont trop optimistes (p95 de
 `cull` 0,36 ms au lieu de 0,64) et ne se comparent pas aux nouveaux.
 
-## Ouvert : `post` mesuré à 0 sur Metal
+## `post` non mesurable sur Metal
 
-Le timestamp de fin de la passe `post` arrive plus tôt que son début (de 3 à
-15 ms) : la soustraction le ramène à 0, et `GPU total`, qui s'arrête alors à
-la fin de `scene`, ne compte pas `post`. La valeur lue ressemble à la fin de
-`post` d'environ deux frames plus tôt, comme si la fin n'était pas encore
-écrite quand on relit l'emplacement.
+Cause trouvée : sur Metal, une passe qui dessine dans l'image de la fenêtre
+n'a pas de timestamp de fin valable au moment de la relecture. La valeur lue
+est celle d'une frame précédente, le plus souvent antérieure au début.
+Dessinée dans une texture hors fenêtre, la même passe `post` se mesure
+normalement : environ 0,24 ms par frame sur M5 Pro, soit à peu près 13 % du
+GPU total.
 
-Écarté : l'ordre dans le command buffer (relecture dans un command buffer
-séparé, même résultat) et le fait que `post` soit la dernière passe (une passe
-ajoutée après, même résultat). Piste restante : `post` est la seule passe qui
-dessine dans l'image de la fenêtre.
+Ce qui est fait :
+- `PassTime::ms` vaut `None` quand la fin tombe avant le début, au lieu de 0 ;
+  `total_ms` ne compte que les passes mesurées (il s'arrête donc à la fin de
+  `scene`, sans `post`).
+- `--compare` affiche `—` pour une passe sans temps sur au moins la moitié des
+  frames, avec une note : une fin périmée qui tombe par hasard après le début
+  ne se distingue pas d'une vraie mesure (1 frame sur 600 dans un run).
+- Les runs enregistrés avant gardent leur faux `0.00` : les refaire.
+
+Reste ouvert : le signaler à wgpu ; et, si un jour il faut mesurer `post`
+sur Metal, dessiner dans une texture puis la copier dans la fenêtre (une
+copie plein écran par frame, à réserver au bench).

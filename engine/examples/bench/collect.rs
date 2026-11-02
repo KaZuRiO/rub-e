@@ -47,8 +47,9 @@ pub struct Measurements {
     pub cpu_frame: Summary,
     /// `None` when no GPU measurement was accepted.
     pub gpu_total: Option<Summary>,
-    /// Per-pass GPU times, in order of first appearance.
-    pub passes: Vec<(String, Summary)>,
+    /// Per-pass GPU times, in order of first appearance; `None` for a pass
+    /// that was never measured.
+    pub passes: Vec<(String, Option<Summary>)>,
 }
 
 /// Gathers the CPU frame times and the (late, asynchronous) GPU timings of the
@@ -120,19 +121,24 @@ impl Collector {
         if !is_measured(bench_frame) || !self.accepted.insert(t.tag) {
             return;
         }
-        // Passes sharing a label within a frame add up.
-        let mut per_label: Vec<(&str, f32)> = Vec::new();
+        // Passes sharing a label within a frame add up; one that was not
+        // measured leaves the label without a time for that frame.
+        let mut per_label: Vec<(&str, Option<f32>)> = Vec::new();
         for p in &t.passes {
             match per_label.iter_mut().find(|(l, _)| *l == p.label) {
-                Some((_, ms)) => *ms += p.ms,
+                Some((_, ms)) => *ms = ms.zip(p.ms).map(|(a, b)| a + b),
                 None => per_label.push((&p.label, p.ms)),
             }
         }
         for (label, ms) in per_label {
-            match self.passes.iter_mut().find(|(l, _)| l == label) {
-                Some((_, v)) => v.push(ms),
-                None => self.passes.push((label.to_owned(), vec![ms])),
-            }
+            let times = match self.passes.iter_mut().find(|(l, _)| l == label) {
+                Some((_, v)) => v,
+                None => {
+                    self.passes.push((label.to_owned(), Vec::new()));
+                    &mut self.passes.last_mut().expect("just pushed").1
+                }
+            };
+            times.extend(ms);
         }
         self.gpu_total_ms.push(t.total_ms);
     }
@@ -159,7 +165,7 @@ impl Collector {
             passes: self
                 .passes
                 .iter()
-                .filter_map(|(l, v)| Some((l.clone(), summarize(v)?)))
+                .map(|(l, v)| (l.clone(), summarize(v)))
                 .collect(),
         }
     }
@@ -173,12 +179,19 @@ mod tests {
     fn pass(label: &str, ms: f32) -> PassTime {
         PassTime {
             label: label.into(),
-            ms,
+            ms: Some(ms),
+        }
+    }
+
+    fn unmeasured(label: &str) -> PassTime {
+        PassTime {
+            label: label.into(),
+            ms: None,
         }
     }
 
     fn gpu(tag: u64, passes: Vec<PassTime>) -> GpuTimings {
-        let total_ms = passes.iter().map(|p| p.ms).sum();
+        let total_ms = passes.iter().filter_map(|p| p.ms).sum();
         GpuTimings {
             tag,
             passes,
@@ -241,7 +254,7 @@ mod tests {
         ));
         c.timings(&gpu(11, vec![pass("post", 4.0)]));
         let m = c.finish();
-        let get = |l: &str| m.passes.iter().find(|(n, _)| n == l).unwrap().1;
+        let get = |l: &str| m.passes.iter().find(|(n, _)| n == l).unwrap().1.unwrap();
         assert_eq!(
             m.passes.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
             ["post", "cull"]
@@ -252,6 +265,24 @@ mod tests {
         let total = m.gpu_total.unwrap();
         assert_eq!(total.samples, 2);
         assert_eq!(total.mean_ms, (3.5 + 4.0) / 2.0);
+    }
+
+    #[test]
+    fn a_pass_never_measured_is_kept_without_a_summary() {
+        let mut c = Collector::new((1280, 720), true);
+        let (a, b) = (WARMUP_FRAMES, WARMUP_FRAMES + 1);
+        c.frame_rendered(10, a, 0.01, (1280, 720)).unwrap();
+        c.frame_rendered(11, b, 0.01, (1280, 720)).unwrap();
+        c.timings(&gpu(10, vec![pass("scene", 2.0), unmeasured("post")]));
+        // Within a frame, one unmeasured repeat leaves the label unmeasured.
+        c.timings(&gpu(
+            11,
+            vec![pass("scene", 3.0), pass("post", 1.0), unmeasured("post")],
+        ));
+        let m = c.finish();
+        assert_eq!(m.passes[0].1.unwrap().samples, 2);
+        assert_eq!(m.passes[1], ("post".to_owned(), None));
+        assert_eq!(m.gpu_total.unwrap().samples, 2);
     }
 
     #[test]
@@ -270,8 +301,8 @@ mod tests {
         c.timings(&gpu(6, vec![pass("a", 9.0)]));
         let m = c.finish();
         assert_eq!(m.gpu_total.unwrap().samples, 1);
-        assert_eq!(m.passes[0].1.samples, 1);
-        assert_eq!(m.passes[0].1.mean_ms, 1.0);
+        let pass = m.passes[0].1.unwrap();
+        assert_eq!((pass.samples, pass.mean_ms), (1, 1.0));
     }
 
     #[test]

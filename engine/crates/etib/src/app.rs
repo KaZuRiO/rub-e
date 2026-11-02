@@ -475,7 +475,7 @@ mod tests {
             tag: 7,
             passes: vec![PassTime {
                 label: "scene".to_owned(),
-                ms: 1.5,
+                ms: Some(1.5),
             }],
             total_ms: 1.5,
         };

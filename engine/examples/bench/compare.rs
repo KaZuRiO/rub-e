@@ -7,6 +7,14 @@ use crate::results::RunResults;
 
 const DASH: &str = "—";
 
+/// A pass with a time for fewer than half of its run's GPU frames is shown as
+/// missing: an end read back before it was written is only caught when it
+/// lands before the start, so the few times left are as likely stale as real.
+fn trusted<'a>(run: &RunResults, summary: Option<&'a Summary>) -> Option<&'a Summary> {
+    let gpu_samples = run.gpu_total.map_or(0, |s| s.samples);
+    summary.filter(|s| s.samples * 2 >= gpu_samples)
+}
+
 fn commit_label(run: &RunResults) -> String {
     match &run.git.commit {
         Some(c) if run.git.dirty => format!("{c}+dirty"),
@@ -83,6 +91,23 @@ pub fn compare(a: &RunResults, b: &RunResults) -> String {
                 run.scenario.measured_frames
             );
         }
+        for (label, summary) in &run.passes {
+            let samples = summary.map_or(0, |s| s.samples);
+            if samples < gpu_samples {
+                let hidden = if trusted(run, summary.as_ref()).is_none() && samples > 0 {
+                    "; the rest are not shown"
+                } else {
+                    ""
+                };
+                let _ = writeln!(
+                    out,
+                    "note: run {side} has no time for pass {label} in {} of {gpu_samples} frames: \
+                     the GPU reported its end before its start (on Metal, every pass drawing \
+                     into the window){hidden}",
+                    gpu_samples - samples
+                );
+            }
+        }
     }
     out.push('\n');
 
@@ -92,7 +117,12 @@ pub fn compare(a: &RunResults, b: &RunResults) -> String {
         row("GPU total", a.gpu_total.as_ref(), b.gpu_total.as_ref()),
     ];
     fn find<'a>(run: &'a RunResults, label: &str) -> Option<&'a Summary> {
-        run.passes.iter().find(|(l, _)| l == label).map(|(_, s)| s)
+        let summary = run
+            .passes
+            .iter()
+            .find(|(l, _)| l == label)
+            .and_then(|(_, s)| s.as_ref());
+        trusted(run, summary)
     }
     let labels = a.passes.iter().map(|(l, _)| l).chain(
         b.passes
@@ -129,7 +159,7 @@ mod tests {
 
     fn run(name: &str, scene_ms: f32) -> RunResults {
         let mut r = sample_run(name);
-        r.passes[0].1.median_ms = scene_ms;
+        r.passes[0].1.as_mut().unwrap().median_ms = scene_ms;
         r
     }
 
@@ -190,6 +220,46 @@ mod tests {
         );
         b.gpu_total = None;
         assert!(compare(&a, &b).contains("only 0 of 100"));
+    }
+
+    #[test]
+    fn compare_notes_a_pass_that_was_not_measured() {
+        let a = run("a", 4.0);
+        let mut b = run("b", 4.0);
+        b.passes.push(("post".into(), None));
+        let out = compare(&a, &b);
+        println!("{out}");
+        assert!(
+            out.contains("run b has no time for pass post in 100 of 100 frames"),
+            "{out}"
+        );
+        let line = out.lines().find(|l| l.starts_with("post")).unwrap();
+        assert!(line.contains('—') && !line.contains("0.00"), "{out}");
+    }
+
+    #[test]
+    fn a_pass_mostly_not_measured_is_not_shown() {
+        let a = run("a", 4.0);
+        let mut b = run("b", 4.0);
+        let mut few = b.passes[0].1.unwrap();
+        few.samples = 1;
+        b.passes.push(("post".into(), Some(few)));
+        let out = compare(&a, &b);
+        println!("{out}");
+        assert!(
+            out.contains("in 99 of 100 frames") && out.contains("not shown"),
+            "{out}"
+        );
+        let line = out.lines().find(|l| l.starts_with("post")).unwrap();
+        assert!(!line.contains("4.00"), "{out}");
+        // Half the frames is enough.
+        b.passes[1].1.as_mut().unwrap().samples = 50;
+        let line = compare(&a, &b)
+            .lines()
+            .find(|l| l.starts_with("post"))
+            .map(str::to_owned)
+            .unwrap();
+        assert!(line.contains("4.00"));
     }
 
     #[test]

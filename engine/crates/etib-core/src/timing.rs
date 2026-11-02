@@ -46,8 +46,11 @@ const MAP_FAILED: u8 = 2;
 pub struct PassTime {
     /// The label the pass was given when it was recorded.
     pub label: String,
-    /// How long the pass took on the GPU, in milliseconds.
-    pub ms: f32,
+    /// How long the pass took on the GPU, in milliseconds, or `None` when the
+    /// GPU reported its end before its start: the end was not written in time
+    /// to be read back. On Metal, this is every pass that draws into the
+    /// window's surface.
+    pub ms: Option<f32>,
 }
 
 /// The GPU timings of one timed submission.
@@ -59,8 +62,9 @@ pub struct GpuTimings {
     /// One entry per pass, in execution order. A label that appears twice
     /// gives two entries.
     pub passes: Vec<PassTime>,
-    /// From the earliest start to the latest end across all passes, in
-    /// milliseconds. Zero when nothing was recorded.
+    /// From the earliest start to the latest end across the passes that were
+    /// measured, in milliseconds: a pass whose [`PassTime::ms`] is `None` is
+    /// left out. Zero when none was.
     pub total_ms: f32,
 }
 
@@ -68,7 +72,7 @@ pub struct GpuTimings {
 ///
 /// `ticks` holds a begin and an end timestamp for each label, in that order,
 /// so it has `2 × labels.len()` entries. `period_ns` is the nanoseconds per
-/// tick. A pair that runs backwards counts as zero rather than underflowing.
+/// tick. A pair that runs backwards is a pass that was not measured.
 pub(crate) fn to_timings(tag: u64, labels: &[String], ticks: &[u64], period_ns: f32) -> GpuTimings {
     let pairs: Vec<(u64, u64)> = ticks
         .chunks_exact(2)
@@ -81,12 +85,13 @@ pub(crate) fn to_timings(tag: u64, labels: &[String], ticks: &[u64], period_ns: 
         .zip(&pairs)
         .map(|(label, &(begin, end))| PassTime {
             label: label.clone(),
-            ms: ticks_to_ms(end.saturating_sub(begin), period_ns),
+            ms: (end >= begin).then(|| ticks_to_ms(end - begin, period_ns)),
         })
         .collect();
 
-    let earliest = pairs.iter().map(|&(begin, _)| begin).min();
-    let latest = pairs.iter().map(|&(_, end)| end).max();
+    let measured = || pairs.iter().filter(|&&(begin, end)| end >= begin);
+    let earliest = measured().map(|&(begin, _)| begin).min();
+    let latest = measured().map(|&(_, end)| end).max();
     let total = match (earliest, latest) {
         (Some(begin), Some(end)) => end.saturating_sub(begin),
         _ => 0,
@@ -381,11 +386,11 @@ mod tests {
             vec![
                 PassTime {
                     label: "cull".into(),
-                    ms: 2.0
+                    ms: Some(2.0)
                 },
                 PassTime {
                     label: "scene".into(),
-                    ms: 3.0
+                    ms: Some(3.0)
                 },
             ]
         );
@@ -393,10 +398,20 @@ mod tests {
     }
 
     #[test]
-    fn backwards_timestamps_count_as_zero() {
+    fn backwards_timestamps_are_not_a_measurement() {
         let t = to_timings(0, &["a".to_owned()], &[5, 3], 1_000_000.0);
-        assert_eq!(t.passes[0].ms, 0.0);
+        assert_eq!(t.passes[0].ms, None);
         assert_eq!(t.total_ms, 0.0);
+    }
+
+    #[test]
+    fn a_pass_not_measured_is_left_out_of_the_total() {
+        let labels = ["scene".to_owned(), "post".to_owned()];
+        // `post` starts at 3 and claims to end at 1, long before.
+        let t = to_timings(0, &labels, &[0, 4, 3, 1], 1_000_000.0);
+        assert_eq!(t.passes[0].ms, Some(4.0));
+        assert_eq!(t.passes[1].ms, None);
+        assert_eq!(t.total_ms, 4.0);
     }
 
     fn pending(tag: u64, state: u8) -> Pending {

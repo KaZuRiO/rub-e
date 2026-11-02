@@ -38,7 +38,9 @@ pub struct RunResults {
     pub gpu_timing: bool,
     pub cpu_frame: Summary,
     pub gpu_total: Option<Summary>,
-    pub passes: Vec<(String, Summary)>,
+    /// `None` for a pass that was never measured. Runs saved before this
+    /// could be `None` read back as before.
+    pub passes: Vec<(String, Option<Summary>)>,
 }
 
 /// Short commit and dirtiness of this repository; no commit when git fails.
@@ -127,7 +129,7 @@ pub mod tests {
             gpu_timing: true,
             cpu_frame: s(5.0),
             gpu_total: Some(s(4.5)),
-            passes: vec![("scene".into(), s(4.0))],
+            passes: vec![("scene".into(), Some(s(4.0)))],
         }
     }
 
