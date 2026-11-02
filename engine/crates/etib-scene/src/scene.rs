@@ -203,8 +203,15 @@ impl Scene {
         self.dynamic.get_mut(id)
     }
 
-    /// How many static cubes the scene holds, before culling.
+    /// How many static cubes the scene was built from, before culling and
+    /// before the buried ones were dropped.
     pub fn static_count(&self) -> u32 {
+        self.statics.as_ref().map_or(0, |statics| statics.total)
+    }
+
+    /// How many static cubes are sent to the GPU: those with at least one
+    /// face free, after removing the buried ones and before frustum culling.
+    pub fn static_exposed_count(&self) -> u32 {
         self.statics.as_ref().map_or(0, |statics| statics.count)
     }
 
@@ -458,7 +465,8 @@ mod tests {
         let mut listed = statics.visible.read_back(&device)[..count].to_vec();
         listed.sort_unstable();
 
-        let layout = crate::culling::build_chunks(&cubes);
+        let layout =
+            crate::culling::build_chunks(&crate::static_world::StaticWorld::from_cubes(&cubes));
         let in_view = [cubes[0].position, cubes[1].position, cubes[2].position];
         let mut expected: Vec<u32> = (0u32..)
             .zip(&layout.instances)
@@ -542,6 +550,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn buried_cubes_are_not_sent() {
+        let Some(device) = device() else { return };
+        // A 3x3x3 block around the origin, all of it in view of camera().
+        let mut cubes = Vec::new();
+        for x in -1..=1 {
+            for y in -1..=1 {
+                for z in -1..=1 {
+                    cubes.push(white_cube(x as f32, y as f32, z as f32));
+                }
+            }
+        }
+        let mut scene = Scene::new(&device, &cubes, 1, 64, 64);
+        assert_eq!(scene.static_count(), 27);
+        assert_eq!(scene.static_exposed_count(), 26);
+
+        let mut encoder = device.encoder("test");
+        scene.render(&device, &mut encoder, &mut camera());
+        finish(&device, encoder);
+        let statics = scene.statics.as_ref().expect("the scene has static cubes");
+        assert_eq!(statics.draw.read_back(&device)[0].instance_count, 26);
     }
 
     #[test]

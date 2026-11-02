@@ -1,13 +1,12 @@
 //! Frustum culling on the GPU, in two compute passes.
 //!
 //! The static cubes are grouped into chunks — 32×32 tiles in the XZ plane, of
-//! any height — once, on the CPU. Each frame the first pass tests every
+//! any height — once, on the CPU, and only those with a face free are kept
+//! (see [`StaticWorld`]). Each frame the first pass tests every
 //! chunk's bounding box against the camera and writes one flag per chunk; the
 //! second runs once per cube, skips those whose chunk is out of view, tests
 //! the rest one by one, and appends the survivors to `visible` while counting
 //! them into the indirect draw. Nothing comes back to the CPU.
-
-use std::collections::HashMap;
 
 use etib_core::{
     Access, BindGroup, BindLayout, ComputePass, ComputePipeline, Device, DrawIndexedArgs,
@@ -17,6 +16,7 @@ use glam::Vec3;
 
 use crate::cube::{INDICES, StaticCubeRaw};
 use crate::model::ModelCube;
+use crate::static_world::StaticWorld;
 
 /// The side of a chunk in the XZ plane, in world units.
 pub(crate) const CHUNK_SIZE: f32 = 32.0;
@@ -50,32 +50,32 @@ pub(crate) struct StaticLayout {
     pub chunks: Vec<ChunkRaw>,
 }
 
-/// Sorts cubes into chunks and works out each chunk's bounds.
+/// The exposed cubes of `world`, chunk by chunk, with each chunk's bounds.
 ///
-/// Chunks come out in a fixed order, by tile, so the same cubes always give
-/// the same buffers.
-pub(crate) fn build_chunks(cubes: &[ModelCube]) -> StaticLayout {
-    let mut tiles: HashMap<(i32, i32), Vec<&ModelCube>> = HashMap::new();
-    for cube in cubes {
-        let key = tile_of(cube.position);
-        tiles.entry(key).or_default().push(cube);
-    }
-    let mut keys: Vec<_> = tiles.keys().copied().collect();
-    keys.sort_unstable();
-
+/// A chunk with no exposed cube gets no entry. Chunks come out in a fixed
+/// order, by tile, and the cubes in a fixed order within each, so the same
+/// cubes always give the same buffers.
+pub(crate) fn build_chunks(world: &StaticWorld) -> StaticLayout {
     let mut layout = StaticLayout {
-        instances: Vec::with_capacity(cubes.len()),
-        chunk_ids: Vec::with_capacity(cubes.len()),
-        chunks: Vec::with_capacity(keys.len()),
+        instances: Vec::new(),
+        chunk_ids: Vec::new(),
+        chunks: Vec::new(),
     };
-    for (index, key) in keys.iter().enumerate() {
-        let members = &tiles[key];
+    for key in world.chunk_keys() {
+        let members = world.exposed(key);
+        if members.is_empty() {
+            continue;
+        }
         // The bounds of the cubes' faces, not of their centres.
         let (min, max) = members.iter().fold(
             (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-            |(min, max), cube| (min.min(cube.position - 0.5), max.max(cube.position + 0.5)),
+            |(min, max), cube| {
+                let centre = Vec3::from(cube.position);
+                (min.min(centre - 0.5), max.max(centre + 0.5))
+            },
         );
 
+        let index = count(layout.chunks.len());
         layout.chunks.push(ChunkRaw {
             aabb_min: min.to_array(),
             _pad0: 0.0,
@@ -84,12 +84,10 @@ pub(crate) fn build_chunks(cubes: &[ModelCube]) -> StaticLayout {
             count: count(members.len()),
             _pad1: [0; 3],
         });
-        for cube in members {
-            layout
-                .instances
-                .push(StaticCubeRaw::new(cube.position, cube.color));
-            layout.chunk_ids.push(count(index));
-        }
+        layout
+            .chunk_ids
+            .extend(std::iter::repeat_n(index, members.len()));
+        layout.instances.extend(members);
     }
     layout
 }
@@ -195,7 +193,13 @@ pub(crate) struct StaticCubes {
     cube_group: BindGroup,
     /// What the static cube draw reads: the instances and `visible`.
     pub draw_group: BindGroup,
+    /// Kept so that a change to the world can rebuild one chunk's range.
+    #[expect(dead_code, reason = "for editing the world, not yet written")]
+    world: StaticWorld,
+    /// Cubes sent to the GPU: the exposed ones.
     pub count: u32,
+    /// Cubes the scene was built from, buried ones and duplicates included.
+    pub total: u32,
     pub chunk_count: u32,
 }
 
@@ -206,7 +210,10 @@ impl StaticCubes {
         if cubes.is_empty() {
             return None;
         }
-        let layout = build_chunks(cubes);
+        let started = std::time::Instant::now();
+        let world = StaticWorld::from_cubes(cubes);
+        let layout = build_chunks(&world);
+        let total = world.total();
         let count = count(layout.instances.len());
         let chunk_count = self::count(layout.chunks.len());
 
@@ -229,7 +236,10 @@ impl StaticCubes {
         let draw_group = passes
             .draw_layout
             .group(device, "static draw", &[&instances, &visible]);
-        log::info!("{count} static cubes in {chunk_count} chunk(s)");
+        log::info!(
+            "{total} static cubes, {count} exposed, in {chunk_count} chunk(s), built in {} ms",
+            started.elapsed().as_millis()
+        );
 
         Some(Self {
             _instances: instances,
@@ -241,7 +251,9 @@ impl StaticCubes {
             chunk_group,
             cube_group,
             draw_group,
+            world,
             count,
+            total,
             chunk_count,
         })
     }
@@ -275,6 +287,7 @@ impl StaticCubes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::static_world::StaticWorld;
 
     fn cube(x: f32, y: f32, z: f32) -> ModelCube {
         ModelCube {
@@ -293,13 +306,13 @@ mod tests {
 
     #[test]
     fn cubes_are_grouped_by_tile() {
-        let layout = build_chunks(&[
+        let layout = build_chunks(&StaticWorld::from_cubes(&[
             cube(66.0, 0.0, 0.0),
             cube(0.0, 0.0, 0.0),
             cube(33.0, 0.0, 0.0),
             cube(1.0, 5.0, 31.0),
             cube(-1.0, 0.0, 0.0),
-        ]);
+        ]));
         // Tiles (-1,0), (0,0), (1,0), (2,0), in that order.
         assert_eq!(layout.chunks.len(), 4);
         assert_eq!(
@@ -321,7 +334,10 @@ mod tests {
 
     #[test]
     fn chunk_bounds_cover_whole_cubes() {
-        let layout = build_chunks(&[cube(0.0, 0.0, 0.0), cube(1.0, 5.0, 31.0)]);
+        let layout = build_chunks(&StaticWorld::from_cubes(&[
+            cube(0.0, 0.0, 0.0),
+            cube(1.0, 5.0, 31.0),
+        ]));
         let chunk = layout.chunks[0];
         assert_eq!(chunk.aabb_min, [-0.5, -0.5, -0.5]);
         assert_eq!(chunk.aabb_max, [1.5, 5.5, 31.5]);
@@ -332,7 +348,10 @@ mod tests {
         let cubes: Vec<_> = (0..200)
             .map(|i| cube((i * 7 % 150) as f32, 0.0, (i * 13 % 90) as f32))
             .collect();
-        let (a, b) = (build_chunks(&cubes), build_chunks(&cubes));
+        let (a, b) = (
+            build_chunks(&StaticWorld::from_cubes(&cubes)),
+            build_chunks(&StaticWorld::from_cubes(&cubes)),
+        );
         assert_eq!(a.chunks, b.chunks);
         assert_eq!(a.chunk_ids, b.chunk_ids);
         assert_eq!(a.instances, b.instances);

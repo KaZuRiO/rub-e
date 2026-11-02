@@ -216,7 +216,7 @@ impl BenchApp {
                 warmup_frames: WARMUP_FRAMES,
                 measured_frames: MEASURED_FRAMES,
                 generated_cubes: self.generated_cubes,
-                kept_cubes: self.scene.static_count(),
+                kept_cubes: self.scene.static_exposed_count(),
             },
             gpu_timing: gpu.device.gpu_timing_available(),
             cpu_frame: measured.cpu_frame,
