@@ -263,6 +263,13 @@ impl<T: Pod> StorageBuffer<T> {
         false
     }
 
+    /// Copies the buffer back to the CPU, waiting for the GPU to finish
+    /// everything submitted so far. For tests only: it stalls the device.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn read_back(&self, device: &Device) -> Vec<T> {
+        bytemuck::pod_collect_to_vec(&read_raw(device, &self.buffer))
+    }
+
     pub(crate) fn raw(&self) -> &wgpu::Buffer {
         &self.buffer
     }
@@ -366,6 +373,13 @@ impl IndirectBuffer {
         false
     }
 
+    /// Copies the draws back to the CPU, waiting for the GPU to finish
+    /// everything submitted so far. For tests only: it stalls the device.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn read_back(&self, device: &Device) -> Vec<DrawIndexedArgs> {
+        bytemuck::pod_collect_to_vec(&read_raw(device, &self.buffer))
+    }
+
     pub(crate) fn raw(&self) -> &wgpu::Buffer {
         &self.buffer
     }
@@ -418,6 +432,41 @@ mod sealed {
 fn element_count(label: &str, len: usize) -> u32 {
     u32::try_from(len)
         .unwrap_or_else(|_| panic!("buffer '{label}' holds more than u32::MAX elements"))
+}
+
+/// The whole of `buffer`, copied through a mappable staging buffer once the
+/// GPU has finished with it.
+#[cfg(any(test, feature = "test-util"))]
+fn read_raw(device: &Device, buffer: &wgpu::Buffer) -> Vec<u8> {
+    let size = buffer.size();
+    let staging = device.raw().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("etib read-back"),
+        size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device
+        .raw()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("etib read-back"),
+        });
+    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
+    device.raw_queue().submit([encoder.finish()]);
+
+    let slice = staging.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |result| {
+        result.expect("mapping a read-back buffer");
+    });
+    device
+        .raw()
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device lost while reading a buffer back");
+    let bytes = slice
+        .get_mapped_range()
+        .expect("reading a mapped read-back buffer")
+        .to_vec();
+    staging.unmap();
+    bytes
 }
 
 fn create_init(
@@ -498,6 +547,35 @@ mod tests {
         assert_eq!(indirect.raw().size(), 40);
         assert_eq!(indirect.offset_of(1), 20);
         indirect.write(&device, 1, &DrawIndexedArgs::default());
+    }
+
+    #[test]
+    fn storage_buffers_read_back_what_was_written() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        let buffer = StorageBuffer::<u32>::from_slice(&device, "test", &[1, 2, 3]);
+        buffer.write(&device, 1, &[7]);
+        assert_eq!(buffer.read_back(&device), [1, 7, 3]);
+    }
+
+    #[test]
+    fn indirect_buffers_read_back_their_args() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        let draw = IndirectBuffer::new(&device, "test", 1);
+        draw.write(
+            &device,
+            0,
+            &DrawIndexedArgs {
+                index_count: 36,
+                instance_count: 4,
+                ..Default::default()
+            },
+        );
+        let args = draw.read_back(&device);
+        assert_eq!((args[0].index_count, args[0].instance_count), (36, 4));
     }
 
     #[test]
