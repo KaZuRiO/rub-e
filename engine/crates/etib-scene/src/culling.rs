@@ -99,7 +99,7 @@ pub(crate) fn build_chunks(cubes: &[ModelCube]) -> StaticLayout {
     clippy::cast_possible_truncation,
     reason = "a world 32 units a tile would need to be 2^36 units wide to overflow, and `as` saturates"
 )]
-fn tile_of(position: Vec3) -> (i32, i32) {
+pub(crate) fn tile_of(position: Vec3) -> (i32, i32) {
     (
         (position.x / CHUNK_SIZE).floor() as i32,
         (position.z / CHUNK_SIZE).floor() as i32,

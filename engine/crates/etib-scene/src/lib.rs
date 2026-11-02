@@ -40,6 +40,7 @@ mod error;
 mod model;
 mod scene;
 mod skybox;
+mod static_world;
 
 pub use camera::{Camera, CameraController, CameraMode, CameraRaw, Move, Projection};
 pub use cube::{CubeRaw, INDICES, StaticCubeRaw, VERTICES, Vertex};
