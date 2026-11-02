@@ -13,9 +13,9 @@ use etib_core::{
     Access, BindGroup, BindLayout, ComputePass, ComputePipeline, Device, DrawIndexedArgs,
     IndirectBuffer, Shader, Stage, StorageBuffer,
 };
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 
-use crate::cube::{CubeRaw, INDICES};
+use crate::cube::{INDICES, StaticCubeRaw};
 use crate::model::ModelCube;
 
 /// The side of a chunk in the XZ plane, in world units.
@@ -44,7 +44,7 @@ pub(crate) struct ChunkRaw {
 /// the chunk each one belongs to alongside.
 #[derive(Debug)]
 pub(crate) struct StaticLayout {
-    pub instances: Vec<CubeRaw>,
+    pub instances: Vec<StaticCubeRaw>,
     /// For each instance, the index of its chunk.
     pub chunk_ids: Vec<u32>,
     pub chunks: Vec<ChunkRaw>,
@@ -85,10 +85,9 @@ pub(crate) fn build_chunks(cubes: &[ModelCube]) -> StaticLayout {
             _pad1: [0; 3],
         });
         for cube in members {
-            layout.instances.push(CubeRaw::new(
-                Mat4::from_translation(cube.position),
-                cube.color.extend(1.0),
-            ));
+            layout
+                .instances
+                .push(StaticCubeRaw::new(cube.position, cube.color));
             layout.chunk_ids.push(count(index));
         }
     }
@@ -123,6 +122,8 @@ pub(crate) struct CullingPasses {
     chunk_layout: BindLayout,
     cube_pipeline: ComputePipeline,
     cube_layout: BindLayout,
+    /// Group 1 of the static cube draw: the instances and the visible list.
+    pub draw_layout: BindLayout,
 }
 
 impl CullingPasses {
@@ -147,8 +148,8 @@ impl CullingPasses {
         // Five storage buffers in one stage, which is what the device's raised
         // limit is for.
         let cube_layout = BindLayout::build(device, "cube cull")
-            .storage_buffer::<CubeRaw>(Stage::Compute, Access::Read)
-            .storage_buffer::<CubeRaw>(Stage::Compute, Access::ReadWrite)
+            .storage_buffer::<StaticCubeRaw>(Stage::Compute, Access::Read)
+            .storage_buffer::<u32>(Stage::Compute, Access::ReadWrite)
             .indirect_buffer(Stage::Compute, Access::ReadWrite)
             .storage_buffer::<u32>(Stage::Compute, Access::Read)
             .storage_buffer::<u32>(Stage::Compute, Access::Read)
@@ -162,27 +163,38 @@ impl CullingPasses {
             &[camera_layout, &cube_layout],
         );
 
+        let draw_layout = BindLayout::build(device, "static draw")
+            .storage_buffer::<StaticCubeRaw>(Stage::Vertex, Access::Read)
+            .storage_buffer::<u32>(Stage::Vertex, Access::Read)
+            .finish();
+
         Self {
             chunk_pipeline,
             chunk_layout,
             cube_pipeline,
             cube_layout,
+            draw_layout,
         }
     }
 }
 
 /// The static cubes on the GPU, and everything culling them needs.
 pub(crate) struct StaticCubes {
-    /// Bound through the cull groups only, but held so they live as long.
-    _instances: StorageBuffer<CubeRaw>,
+    /// Bound through the cull and draw groups only, but held so they live as
+    /// long.
+    _instances: StorageBuffer<StaticCubeRaw>,
     _chunks: StorageBuffer<ChunkRaw>,
     _chunk_visible: StorageBuffer<u32>,
     _chunk_ids: StorageBuffer<u32>,
-    /// The cubes that survived this frame, drawn as instances.
-    pub visible: StorageBuffer<CubeRaw>,
+    /// The indices into the instances of the cubes that survived this frame.
+    /// Bound through the cull and draw groups; read directly only by tests.
+    #[cfg_attr(not(test), expect(dead_code, reason = "held for the bind groups"))]
+    pub visible: StorageBuffer<u32>,
     pub draw: IndirectBuffer,
     chunk_group: BindGroup,
     cube_group: BindGroup,
+    /// What the static cube draw reads: the instances and `visible`.
+    pub draw_group: BindGroup,
     pub count: u32,
     pub chunk_count: u32,
 }
@@ -214,6 +226,9 @@ impl StaticCubes {
             "cube cull",
             &[&instances, &visible, &draw, &chunk_ids, &chunk_visible],
         );
+        let draw_group = passes
+            .draw_layout
+            .group(device, "static draw", &[&instances, &visible]);
         log::info!("{count} static cubes in {chunk_count} chunk(s)");
 
         Some(Self {
@@ -225,6 +240,7 @@ impl StaticCubes {
             draw,
             chunk_group,
             cube_group,
+            draw_group,
             count,
             chunk_count,
         })
@@ -296,8 +312,11 @@ mod tests {
         );
         assert_eq!(layout.chunk_ids, [0, 1, 1, 2, 3]);
         assert_eq!(layout.instances.len(), 5);
-        assert_eq!(layout.instances[0].model[3], [-1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(layout.instances[0].color, [0.5, 0.25, 1.0, 1.0]);
+        assert_eq!(layout.instances[0].position, [-1.0, 0.0, 0.0]);
+        assert_eq!(
+            layout.instances[0].color,
+            crate::cube::pack_srgb8(Vec3::new(0.5, 0.25, 1.0))
+        );
     }
 
     #[test]

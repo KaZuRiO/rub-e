@@ -35,7 +35,10 @@ const BACKGROUND: Color = Color::BLACK;
 /// Dynamic models are added, moved and removed at runtime; they are few, so
 /// they are drawn without culling.
 pub struct Scene {
+    /// Dynamic cubes, from an instance buffer of [`CubeRaw`]s.
     pipeline: RenderPipeline,
+    /// Static cubes, from storage through the list culling leaves.
+    static_pipeline: RenderPipeline,
     camera_layout: BindLayout,
     camera: UniformBuffer<CameraRaw>,
     camera_group: BindGroup,
@@ -75,7 +78,14 @@ impl Scene {
         let camera = UniformBuffer::new(device, "camera");
         let camera_group = camera_layout.group(device, "camera", &[&camera]);
 
-        let shader = Shader::wgsl(device, "cubes", include_str!("shaders/cube.wgsl"));
+        let shader = Shader::wgsl(
+            device,
+            "cubes",
+            concat!(
+                include_str!("shaders/cube.wgsl"),
+                include_str!("shaders/shading.wgsl")
+            ),
+        );
         let pipeline = RenderPipeline::raster(
             device,
             &RasterDesc {
@@ -92,6 +102,28 @@ impl Scene {
         );
 
         let culling = CullingPasses::new(device, &camera_layout);
+        let static_shader = Shader::wgsl(
+            device,
+            "static cubes",
+            concat!(
+                include_str!("shaders/static_cube.wgsl"),
+                include_str!("shaders/shading.wgsl")
+            ),
+        );
+        let static_pipeline = RenderPipeline::raster(
+            device,
+            &RasterDesc {
+                label: "static cubes",
+                shader: &static_shader,
+                entry_points: ("vs_main", "fs_main"),
+                layouts: &[&camera_layout, &culling.draw_layout],
+                vertex: &[Vertex::LAYOUT],
+                target: Self::TARGET.format(),
+                depth: Some(Depth::default()),
+                blend: Blend::Replace,
+                cull: Cull::Back,
+            },
+        );
         let statics = StaticCubes::new(device, &culling, static_cubes);
 
         let dynamic_capacity = dynamic_capacity.max(1);
@@ -100,6 +132,7 @@ impl Scene {
 
         Self {
             pipeline,
+            static_pipeline,
             camera_layout,
             camera,
             camera_group,
@@ -230,16 +263,17 @@ impl Scene {
             &self.depth,
             DepthLoad::Clear(1.0),
         );
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.camera_group);
         pass.set_vertex_buffer(0, &self.vertices);
         pass.set_index_buffer(&self.indices);
 
         if let Some(statics) = &self.statics {
-            pass.set_vertex_buffer(1, &statics.visible);
+            pass.set_pipeline(&self.static_pipeline);
+            pass.set_bind_group(1, &statics.draw_group);
             pass.draw_indexed_indirect(&statics.draw, 0);
         }
         if self.dynamic_uploaded > 0 {
+            pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(1, &self.dynamic_buffer);
             pass.draw_indexed(0..self.indices.len(), 0, 0..self.dynamic_uploaded);
         }
@@ -388,10 +422,9 @@ mod tests {
         statics.draw.read_back(device)[0].instance_count
     }
 
-    #[test]
-    fn culling_keeps_only_cubes_in_view() {
-        let Some(device) = device() else { return };
-        let cubes = [
+    /// Cubes around what `camera()` sees: the first three are in view.
+    fn view_test_cubes() -> [ModelCube; 7] {
+        [
             white_cube(0.0, 0.0, 0.0),     // in view
             white_cube(1.0, 0.0, 0.0),     // in view
             white_cube(0.0, 1.0, -3.0),    // in view
@@ -399,8 +432,41 @@ mod tests {
             white_cube(0.0, 5.0, 40.0),    // behind the eye
             white_cube(-500.0, 0.0, 0.0),  // far to the left, in its own chunk
             white_cube(0.0, 0.0, -2000.0), // past the far plane
-        ];
+        ]
+    }
+
+    #[test]
+    fn culling_keeps_only_cubes_in_view() {
+        let Some(device) = device() else { return };
+        let cubes = view_test_cubes();
         assert_eq!(cubes_kept(&device, &cubes, &mut camera()), 3);
+    }
+
+    /// What culling lists is the index of each visible cube in the static
+    /// instances, each one once.
+    #[test]
+    fn visible_cubes_are_listed_by_index() {
+        let Some(device) = device() else { return };
+        let cubes = view_test_cubes();
+        let mut scene = Scene::new(&device, &cubes, 1, 64, 64);
+        let mut encoder = device.encoder("test");
+        scene.render(&device, &mut encoder, &mut camera());
+        finish(&device, encoder);
+
+        let statics = scene.statics.as_ref().expect("the scene has static cubes");
+        let count = statics.draw.read_back(&device)[0].instance_count as usize;
+        let mut listed = statics.visible.read_back(&device)[..count].to_vec();
+        listed.sort_unstable();
+
+        let layout = crate::culling::build_chunks(&cubes);
+        let in_view = [cubes[0].position, cubes[1].position, cubes[2].position];
+        let mut expected: Vec<u32> = (0u32..)
+            .zip(&layout.instances)
+            .filter(|(_, raw)| in_view.contains(&Vec3::from(raw.position)))
+            .map(|(index, _)| index)
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(listed, expected);
     }
 
     #[test]
