@@ -211,7 +211,7 @@ impl StaticCubes {
         let chunk_count = self::count(layout.chunks.len());
 
         let instances = StorageBuffer::from_slice(device, "static instances", &layout.instances);
-        let visible = StorageBuffer::new(device, "visible instances", count);
+        let visible = StorageBuffer::new(device, "visible indices", count);
         let draw = IndirectBuffer::new(device, "static draw", 1);
         let chunks = StorageBuffer::from_slice(device, "chunks", &layout.chunks);
         let chunk_visible = StorageBuffer::new(device, "chunk visibility", chunk_count);

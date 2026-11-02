@@ -3,7 +3,8 @@
 use etib_core::{StepMode, VertexAttribute, VertexFormat, VertexLayout};
 use glam::{Mat4, Vec3, Vec4};
 
-/// One corner of the cube mesh. Mirrors `VertexInput` in `cube.wgsl`.
+/// One corner of the cube mesh. Mirrors `VertexInput` in `cube.wgsl` and
+/// `static_cube.wgsl`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {

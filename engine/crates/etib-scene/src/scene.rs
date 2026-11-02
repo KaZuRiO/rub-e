@@ -469,6 +469,81 @@ mod tests {
         assert_eq!(listed, expected);
     }
 
+    /// A half float as an f32.
+    fn from_f16(half: u16) -> f32 {
+        let exponent = i32::from((half >> 10) & 0x1f);
+        let mantissa = f32::from(half & 0x03ff);
+        let magnitude = match exponent {
+            0 => mantissa * 2.0f32.powi(-24),
+            _ => (1.0 + mantissa / 1024.0) * 2.0f32.powi(exponent - 15),
+        };
+        if half & 0x8000 == 0 {
+            magnitude
+        } else {
+            -magnitude
+        }
+    }
+
+    /// The scene's target as linear RGBA, one `[f32; 4]` per pixel.
+    fn pixels(scene: &Scene, device: &Device) -> Vec<[f32; 4]> {
+        scene
+            .target
+            .read_back(device)
+            .chunks_exact(8)
+            .map(|texel| {
+                let channel = |i: usize| from_f16(u16::from_le_bytes([texel[i], texel[i + 1]]));
+                [channel(0), channel(2), channel(4), channel(6)]
+            })
+            .collect()
+    }
+
+    /// The static pipeline draws exactly what the dynamic one, which takes
+    /// a full matrix and a float colour, draws for the same cubes: same
+    /// places, same faces, same colours to within 8-bit sRGB.
+    #[test]
+    fn static_cubes_look_like_the_same_cubes_drawn_dynamically() {
+        let Some(device) = device() else { return };
+        let coloured = |x: f32, y: f32, z: f32, r: f32, g: f32, b: f32| ModelCube {
+            position: Vec3::new(x, y, z),
+            color: Vec3::new(r, g, b),
+        };
+        // Out-of-view cubes first and in other chunks, so a visible cube's
+        // index in the instances is not its place in the visible list.
+        let cubes = vec![
+            coloured(-500.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+            coloured(0.0, 5.0, 40.0, 1.0, 1.0, 1.0),
+            coloured(0.0, 0.0, 0.0, 0.8, 0.2, 0.05),
+            coloured(1.5, 0.0, 0.0, 0.02, 0.6, 0.3),
+            coloured(-1.5, 1.0, -2.0, 0.3, 0.01, 0.9),
+        ];
+        let render = |scene: &mut Scene| {
+            let mut encoder = device.encoder("test");
+            scene.render(&device, &mut encoder, &mut camera());
+            finish(&device, encoder);
+            pixels(scene, &device)
+        };
+
+        let mut statics = Scene::new(&device, &cubes, 1, 64, 64);
+        let mut dynamics = Scene::new(&device, &[], cubes.len(), 64, 64);
+        dynamics
+            .add_dynamic(DynamicModel::from_cubes(cubes.clone()))
+            .expect("room for the cubes");
+        let (drawn, reference) = (render(&mut statics), render(&mut dynamics));
+
+        let lit = reference.iter().filter(|p| p[..3] != [0.0; 3]).count();
+        assert!(lit > 50, "the reference shows the cubes: {lit} pixels lit");
+        for (i, (got, want)) in drawn.iter().zip(&reference).enumerate() {
+            for c in 0..3 {
+                assert!(
+                    (got[c] - want[c]).abs() <= want[c] * 0.03 + 0.002,
+                    "pixel ({}, {}): {got:?} != {want:?}",
+                    i % 64,
+                    i / 64
+                );
+            }
+        }
+    }
+
     #[test]
     fn ortho_culling_keeps_only_cubes_in_the_box() {
         let Some(device) = device() else { return };
