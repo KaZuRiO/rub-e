@@ -9,6 +9,11 @@
 //! cargo run --release --bin bench -- --compare before after
 //! ```
 //!
+//! `--scenario` picks what `--save` plays: `terrain` (the default), `scattered`,
+//! `moving` or `few-changes`. Each run goes under its own name, so one per
+//! scenario is `--save before-moving --scenario moving`; comparing two
+//! scenarios warns that the numbers are not comparable.
+//!
 //! `--save` opens a window, plays the scenario, writes
 //! `bench-results/<NAME>.json` and quits; Escape stops it without writing
 //! anything, and so does a change of the window's size. `--compare` prints the
@@ -28,12 +33,15 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use etib::{App, Frame, Gpu, Grade, Hdr, Output, PostProcess, Vsync};
 use etib_scene::glam::{Mat4, Vec3};
-use etib_scene::{Camera, ModelCube, Projection, Scene};
+use etib_scene::{Camera, DynamicId, DynamicModel, ModelCube, Projection, Scene};
 use log::{error, info, warn};
 
 use collect::Collector;
 use results::{RunResults, ScenarioInfo};
-use scenario::{FAR_DISTANCE, MEASURED_FRAMES, SCENARIO_VERSION, WARMUP_FRAMES, WINDOW};
+use scenario::{
+    FAR_DISTANCE, MEASURED_FRAMES, SCENARIO_VERSION, Scenario, WARMUP_FRAMES, WINDOW,
+    model_position,
+};
 
 const SKY: &[u8] = include_bytes!("../../assets/sky.hdr");
 /// Texels along each side of a skybox face, as in `hello`.
@@ -49,6 +57,9 @@ struct Args {
     /// Print two saved runs side by side, the first as the base.
     #[arg(long, num_args = 2, value_names = ["A", "B"])]
     compare: Option<Vec<String>>,
+    /// What to play, with --save.
+    #[arg(long, value_enum, default_value_t, conflicts_with = "compare")]
+    scenario: Scenario,
 }
 
 fn main() -> ExitCode {
@@ -61,7 +72,7 @@ fn main() -> ExitCode {
 
     let args = Args::parse();
     let result = match (args.save, args.compare.as_deref()) {
-        (Some(name), _) => save_run(name),
+        (Some(name), _) => save_run(name, args.scenario),
         (None, Some([a, b])) => compare_runs(a, b).map(|()| true),
         _ => unreachable!("clap requires exactly one of --save and --compare <A> <B>"),
     };
@@ -92,14 +103,20 @@ enum Outcome {
 }
 
 /// Plays the scenario; `Ok(false)` when nothing was saved.
-fn save_run(name: String) -> Result<bool> {
+fn save_run(name: String, scenario: Scenario) -> Result<bool> {
     results::check_name(&name)?;
     let existing = results::results_dir().join(format!("{name}.json"));
     if existing.exists() {
         warn!("{} will be overwritten", existing.display());
     }
-    let cubes = scenario::world();
-    info!("{} cubes generated", cubes.len());
+    let cubes = scenario.static_cubes();
+    let models = scenario.models();
+    info!(
+        "{}: {} cubes generated, {} dynamic models",
+        scenario.name(),
+        cubes.len(),
+        models.len()
+    );
     let outcome = Rc::new(Cell::new(Outcome::Running));
 
     let app_outcome = Rc::clone(&outcome);
@@ -112,7 +129,16 @@ fn save_run(name: String) -> Result<bool> {
             fullscreen: false,
             exit_on_escape: true,
         },
-        move |gpu| BenchApp::new(gpu, &cubes, name.clone(), Rc::clone(&app_outcome)),
+        move |gpu| {
+            BenchApp::new(
+                gpu,
+                scenario,
+                &cubes,
+                &models,
+                name.clone(),
+                Rc::clone(&app_outcome),
+            )
+        },
     )?;
 
     Ok(match outcome.get() {
@@ -128,7 +154,10 @@ fn save_run(name: String) -> Result<bool> {
 
 struct BenchApp {
     name: String,
+    scenario: Scenario,
     scene: Scene,
+    /// The dynamic models, in the order the scenario counts them.
+    models: Vec<DynamicId>,
     camera: Camera,
     post: PostProcess,
     grade: Grade,
@@ -136,6 +165,7 @@ struct BenchApp {
     collector: Collector,
     surface_size: (u32, u32),
     generated_cubes: u32,
+    dynamic_cubes: u32,
     /// Frames rendered so far, which picks the camera pose.
     bench_frame: u32,
     /// When the previous frame was rendered. The bench times frames itself:
@@ -147,15 +177,22 @@ struct BenchApp {
 impl BenchApp {
     fn new(
         gpu: &Gpu,
+        scenario: Scenario,
         cubes: &[ModelCube],
+        models: &[DynamicModel],
         name: String,
         outcome: Rc<Cell<Outcome>>,
     ) -> Result<Self> {
         let generated_cubes = u32::try_from(cubes.len()).context("too many cubes")?;
         let (width, height) = gpu.size();
 
-        // Nothing dynamic: the scene only needs to be valid.
-        let mut scene = Scene::new(&gpu.device, cubes, 1, width, height);
+        let dynamic_cubes: usize = models.iter().map(DynamicModel::cube_count).sum();
+        let mut scene = Scene::new(&gpu.device, cubes, dynamic_cubes, width, height);
+        let models = models
+            .iter()
+            .map(|model| scene.add_dynamic(model.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .context("adding the dynamic models")?;
         scene
             .set_skybox_from_hdr(&gpu.device, SKY, SKY_FACE, Mat4::IDENTITY)
             .context("loading the skybox")?;
@@ -177,7 +214,9 @@ impl BenchApp {
 
         Ok(Self {
             name,
+            scenario,
             scene,
+            models,
             camera,
             post,
             grade: Grade::default(),
@@ -185,6 +224,7 @@ impl BenchApp {
             collector: Collector::new((width, height), gpu.device.gpu_timing_available()),
             surface_size: (width, height),
             generated_cubes,
+            dynamic_cubes: u32::try_from(dynamic_cubes).context("too many dynamic cubes")?,
             bench_frame: 0,
             last_render: None,
             outcome,
@@ -212,13 +252,13 @@ impl BenchApp {
             surface_size: self.surface_size,
             git: results::git_info(),
             scenario: ScenarioInfo {
-                name: "terrain".to_owned(),
+                name: self.scenario.name().to_owned(),
                 version: SCENARIO_VERSION,
                 warmup_frames: WARMUP_FRAMES,
                 measured_frames: MEASURED_FRAMES,
                 generated_cubes: self.generated_cubes,
                 kept_cubes: self.scene.static_count(),
-                dynamic_cubes: 0,
+                dynamic_cubes: self.dynamic_cubes,
             },
             gpu_timing: gpu.device.gpu_timing_available(),
             cpu_frame: measured.cpu_frame,
@@ -268,6 +308,11 @@ impl App for BenchApp {
             .map_or(0.0, |last| (now - last).as_secs_f32());
 
         (self.camera.eye, self.camera.target) = scenario::camera_at(self.bench_frame);
+        for index in self.scenario.moved_models(self.bench_frame) {
+            if let Some(model) = self.scene.dynamic_mut(self.models[index]) {
+                model.position = model_position(index, self.bench_frame);
+            }
+        }
         self.scene.render(&gpu.device, encoder, &mut self.camera);
         self.post
             .draw(&gpu.device, encoder, view, &self.grade, self.output);
@@ -292,5 +337,34 @@ impl App for BenchApp {
         if self.collector.is_done(self.bench_frame) {
             self.outcome.set(self.save(gpu));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_scenario_defaults_to_the_terrain() {
+        let args = Args::try_parse_from(["bench", "--save", "base"]).unwrap();
+        assert_eq!(args.scenario, Scenario::Terrain);
+    }
+
+    #[test]
+    fn a_scenario_is_chosen_by_its_name() {
+        let args =
+            Args::try_parse_from(["bench", "--save", "base", "--scenario", "few-changes"]).unwrap();
+        assert_eq!(args.scenario, Scenario::FewChanges);
+    }
+
+    #[test]
+    fn a_scenario_means_nothing_to_a_comparison() {
+        let args = ["bench", "--compare", "a", "b", "--scenario", "moving"];
+        assert!(Args::try_parse_from(args).is_err());
+    }
+
+    #[test]
+    fn a_scenario_needs_a_run_to_apply_to() {
+        assert!(Args::try_parse_from(["bench", "--scenario", "moving"]).is_err());
     }
 }

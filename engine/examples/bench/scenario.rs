@@ -188,7 +188,7 @@ const TOWER_WIDTH: i32 = 5;
 /// A `SIDE` x `SIDE` terrain filled from y = 0 up to a rolling surface, with a
 /// grid of solid towers rising out of it. Cubes are 1 unit wide, centred on
 /// integer coordinates; the terrain is centred on the origin.
-pub fn world() -> Vec<ModelCube> {
+fn world() -> Vec<ModelCube> {
     let mut cubes = Vec::with_capacity(700_000);
     for x in -SIDE / 2..SIDE / 2 {
         for z in -SIDE / 2..SIDE / 2 {
