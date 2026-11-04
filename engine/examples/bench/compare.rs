@@ -25,11 +25,13 @@ fn commit_label(run: &RunResults) -> String {
 
 fn header_line(run: &RunResults) -> String {
     format!(
-        "{} ({}, {} cubes generated, {} kept)",
+        "{} ({}, {}: {} cubes generated, {} kept, {} dynamic)",
         run.name,
         commit_label(run),
+        run.scenario.name,
         run.scenario.generated_cubes,
-        run.scenario.kept_cubes
+        run.scenario.kept_cubes,
+        run.scenario.dynamic_cubes
     )
 }
 
@@ -65,7 +67,8 @@ pub fn compare(a: &RunResults, b: &RunResults) -> String {
     let _ = writeln!(out, "a: {}", header_line(a));
     let _ = writeln!(out, "b: {}", header_line(b));
 
-    if a.scenario.version != b.scenario.version
+    if a.scenario.name != b.scenario.name
+        || a.scenario.version != b.scenario.version
         || a.scenario.warmup_frames != b.scenario.warmup_frames
         || a.scenario.measured_frames != b.scenario.measured_frames
     {
@@ -182,6 +185,26 @@ mod tests {
         assert!(!compare(&a, &b).contains("not the same"));
         b.scenario.version += 1;
         assert!(compare(&a, &b).contains("not the same scenario"));
+    }
+
+    #[test]
+    fn compare_warns_when_the_scenarios_have_different_names() {
+        let a = run("a", 4.0);
+        let mut b = run("b", 4.0);
+        b.scenario.name = "moving".into();
+        assert!(compare(&a, &b).contains("not the same scenario"));
+    }
+
+    #[test]
+    fn compare_names_the_scenario_and_its_dynamic_cubes() {
+        let mut a = run("a", 4.0);
+        a.scenario.name = "moving".into();
+        a.scenario.dynamic_cubes = 40_328;
+        let out = compare(&a, &a);
+        assert!(
+            out.contains("moving") && out.contains("40328 dynamic"),
+            "{out}"
+        );
     }
 
     #[test]

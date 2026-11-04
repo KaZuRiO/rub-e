@@ -11,11 +11,20 @@ use crate::collect::Summary;
 /// The scenario a run was measured on.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioInfo {
+    /// Runs saved before there were scenarios all played the terrain.
+    #[serde(default = "terrain")]
+    pub name: String,
     pub version: u32,
     pub warmup_frames: u32,
     pub measured_frames: u32,
     pub generated_cubes: u32,
     pub kept_cubes: u32,
+    #[serde(default)]
+    pub dynamic_cubes: u32,
+}
+
+fn terrain() -> String {
+    "terrain".to_owned()
 }
 
 /// The state of the repository when a run was made.
@@ -120,11 +129,13 @@ pub mod tests {
                 dirty: false,
             },
             scenario: ScenarioInfo {
+                name: "terrain".into(),
                 version: 1,
                 warmup_frames: 10,
                 measured_frames: 100,
                 generated_cubes: 5000,
                 kept_cubes: 4000,
+                dynamic_cubes: 0,
             },
             gpu_timing: true,
             cpu_frame: s(5.0),
@@ -172,5 +183,16 @@ pub mod tests {
     #[test]
     fn git_info_does_not_panic() {
         let _ = git_info();
+    }
+
+    #[test]
+    fn a_run_saved_before_there_were_scenarios_is_the_terrain() {
+        let mut json = serde_json::to_value(sample_run("old")).unwrap();
+        let scenario = json["scenario"].as_object_mut().unwrap();
+        scenario.remove("name");
+        scenario.remove("dynamic_cubes");
+        let run: RunResults = serde_json::from_value(json).unwrap();
+        assert_eq!(run.scenario.name, "terrain");
+        assert_eq!(run.scenario.dynamic_cubes, 0);
     }
 }

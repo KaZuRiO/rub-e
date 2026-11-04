@@ -212,11 +212,13 @@ impl BenchApp {
             surface_size: self.surface_size,
             git: results::git_info(),
             scenario: ScenarioInfo {
+                name: "terrain".to_owned(),
                 version: SCENARIO_VERSION,
                 warmup_frames: WARMUP_FRAMES,
                 measured_frames: MEASURED_FRAMES,
                 generated_cubes: self.generated_cubes,
                 kept_cubes: self.scene.static_count(),
+                dynamic_cubes: 0,
             },
             gpu_timing: gpu.device.gpu_timing_available(),
             cpu_frame: measured.cpu_frame,
