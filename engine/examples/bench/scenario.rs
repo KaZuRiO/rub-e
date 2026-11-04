@@ -52,7 +52,8 @@ pub enum Scenario {
     /// Solid ground and towers: most cubes are buried.
     #[default]
     Terrain,
-    /// Static cubes apart from each other and off the grid: nothing is buried.
+    /// Static cubes apart from each other and off the grid: no cube has a
+    /// neighbour to hide a face against, though they still hide one another.
     Scattered,
     /// A swarm of dynamic models that all move every frame.
     Moving,
