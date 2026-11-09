@@ -15,6 +15,7 @@ use crate::dynamic::{DynamicId, DynamicModel, DynamicModels};
 use crate::error::Result;
 use crate::model::ModelCube;
 use crate::skybox::Skybox;
+use crate::world::World;
 
 /// What the scene is cleared to where neither a cube nor a skybox is drawn.
 const BACKGROUND: Color = Color::BLACK;
@@ -43,6 +44,9 @@ pub struct Scene {
     indices: IndexBuffer,
 
     culling: CullingPasses,
+    /// The static cubes as the game sees them.
+    world: World,
+    /// Their copy on the GPU; `None` for a static capacity of 0.
     statics: Option<StaticCubes>,
 
     dynamic: DynamicModels,
@@ -60,11 +64,20 @@ impl Scene {
     /// The format of [`target_view`](Self::target_view).
     pub const TARGET: StorageFormat = StorageFormat::Rgba16Float;
 
-    /// Builds a scene of `static_cubes`, with room for `dynamic_capacity`
-    /// cubes across all the dynamic models, drawing at `width` x `height`.
+    /// Builds a scene of `static_cubes`, with room for `static_capacity`
+    /// static cubes and `dynamic_capacity` cubes across all the dynamic
+    /// models, drawing at `width` x `height`.
+    ///
+    /// The GPU memory of the static cubes follows `static_capacity`, at about
+    /// 220 bytes a cube.
+    ///
+    /// # Panics
+    ///
+    /// If `static_capacity` is below `static_cubes.len()`.
     pub fn new(
         device: &Device,
         static_cubes: &[ModelCube],
+        static_capacity: usize,
         dynamic_capacity: usize,
         width: u32,
         height: u32,
@@ -91,8 +104,14 @@ impl Scene {
             },
         );
 
+        assert!(
+            static_cubes.len() <= static_capacity,
+            "{} static cubes do not fit a static capacity of {static_capacity}",
+            static_cubes.len()
+        );
+        let world = World::new(static_cubes, static_capacity);
         let culling = CullingPasses::new(device, &camera_layout);
-        let statics = StaticCubes::new(device, &culling, static_cubes);
+        let statics = StaticCubes::new(device, &culling, &world);
 
         let dynamic_capacity = dynamic_capacity.max(1);
         let dynamic_buffer =
@@ -106,6 +125,7 @@ impl Scene {
             vertices: VertexBuffer::new(device, "cube vertices", VERTICES),
             indices: IndexBuffer::u16(device, "cube indices", INDICES),
             culling,
+            world,
             statics,
             dynamic: DynamicModels::new(dynamic_capacity),
             dynamic_buffer,
@@ -172,7 +192,7 @@ impl Scene {
 
     /// How many static cubes the scene holds, before culling.
     pub fn static_count(&self) -> u32 {
-        self.statics.as_ref().map_or(0, |statics| statics.count)
+        u32::try_from(self.world.cube_count()).expect("a static capacity under u32::MAX")
     }
 
     /// Cubes across all the live dynamic models.
@@ -309,7 +329,7 @@ mod tests {
     #[test]
     fn empty_scene_has_no_static_geometry() {
         let Some(device) = device() else { return };
-        let mut scene = Scene::new(&device, &[], 10, 800, 600);
+        let mut scene = Scene::new(&device, &[], 0, 10, 800, 600);
         assert_eq!(scene.static_count(), 0);
         assert_eq!(scene.dynamic_count(), 0);
 
@@ -326,15 +346,15 @@ mod tests {
             white_cube(33.0, 0.0, 0.0),
             white_cube(66.0, 0.0, 0.0),
         ];
-        let scene = Scene::new(&device, &cubes, 10, 800, 600);
+        let scene = Scene::new(&device, &cubes, cubes.len(), 10, 800, 600);
         assert_eq!(scene.static_count(), 3);
-        assert_eq!(scene.statics.as_ref().unwrap().chunk_count, 3);
+        assert_eq!(scene.statics.as_ref().unwrap().chunk_count(), 3);
     }
 
     #[test]
     fn dynamic_models_are_added_moved_and_removed() {
         let Some(device) = device() else { return };
-        let mut scene = Scene::new(&device, &[], 10, 800, 600);
+        let mut scene = Scene::new(&device, &[], 0, 10, 800, 600);
         let id = scene
             .add_dynamic(DynamicModel::from_cubes(vec![white_cube(0.0, 0.0, 0.0)]))
             .unwrap();
@@ -362,7 +382,7 @@ mod tests {
         let cubes: Vec<_> = (0..100)
             .map(|i| white_cube((i % 10) as f32 * 4.0, 0.0, (i / 10) as f32 * 4.0))
             .collect();
-        let mut scene = Scene::new(&device, &cubes, 4, 64, 64);
+        let mut scene = Scene::new(&device, &cubes, cubes.len(), 4, 64, 64);
         scene
             .add_dynamic(DynamicModel::from_cubes(vec![white_cube(0.0, 2.0, 0.0); 4]))
             .unwrap();
@@ -380,7 +400,7 @@ mod tests {
 
     /// How many static cubes survived culling in the frame `camera` sees.
     fn cubes_kept(device: &Device, cubes: &[ModelCube], camera: &mut Camera) -> u32 {
-        let mut scene = Scene::new(device, cubes, 1, 64, 64);
+        let mut scene = Scene::new(device, cubes, cubes.len(), 1, 64, 64);
         let mut encoder = device.encoder("test");
         scene.render(device, &mut encoder, camera);
         finish(device, encoder);
@@ -433,7 +453,7 @@ mod tests {
         // About 6.5 units off-axis is the edge of a square view at this
         // distance; a 4:1 view reaches about 26.
         let cubes = [white_cube(15.0, 0.0, 0.0)];
-        let mut scene = Scene::new(&device, &cubes, 1, 128, 32);
+        let mut scene = Scene::new(&device, &cubes, cubes.len(), 1, 128, 32);
         let mut camera = camera();
         assert_eq!(camera.aspect, 1.0);
 
@@ -447,7 +467,7 @@ mod tests {
     #[test]
     fn resizing_reports_a_new_target() {
         let Some(device) = device() else { return };
-        let mut scene = Scene::new(&device, &[], 10, 800, 600);
+        let mut scene = Scene::new(&device, &[], 0, 10, 800, 600);
         assert!(!scene.resize(&device, 800, 600));
         assert!(scene.resize(&device, 1280, 720));
         assert_eq!(scene.size(), (1280, 720));
@@ -460,9 +480,35 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_chunk_row_is_never_visible() {
+        let Some(device) = device() else { return };
+        let mut scene = Scene::new(&device, &[white_cube(0.0, 0.0, 0.0)], 8, 1, 64, 64);
+        let mut encoder = device.encoder("test");
+        scene.render(&device, &mut encoder, &mut camera());
+        finish(&device, encoder);
+        let statics = scene.statics.as_ref().unwrap();
+        assert_eq!(statics.draw.read_back(&device)[0].instance_count, 1);
+    }
+
+    #[test]
+    fn a_capacity_of_zero_makes_no_static_buffers() {
+        let Some(device) = device() else { return };
+        assert!(Scene::new(&device, &[], 0, 1, 64, 64).statics.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "static capacity")]
+    fn more_cubes_than_capacity_panics() {
+        let Some(device) = device() else {
+            panic!("static capacity")
+        };
+        Scene::new(&device, &[white_cube(0.0, 0.0, 0.0)], 0, 1, 64, 64);
+    }
+
+    #[test]
     fn a_broken_skybox_is_an_error() {
         let Some(device) = device() else { return };
-        let mut scene = Scene::new(&device, &[], 10, 64, 64);
+        let mut scene = Scene::new(&device, &[], 0, 10, 64, 64);
         let err = scene
             .set_skybox_from_hdr(&device, b"not an image", 16, Mat4::IDENTITY)
             .unwrap_err();

@@ -187,7 +187,14 @@ impl BenchApp {
         let (width, height) = gpu.size();
 
         let dynamic_cubes: usize = models.iter().map(DynamicModel::cube_count).sum();
-        let mut scene = Scene::new(&gpu.device, cubes, dynamic_cubes, width, height);
+        let mut scene = Scene::new(
+            &gpu.device,
+            cubes,
+            cubes.len(),
+            dynamic_cubes,
+            width,
+            height,
+        );
         let models = models
             .iter()
             .map(|model| scene.add_dynamic(model.clone()))

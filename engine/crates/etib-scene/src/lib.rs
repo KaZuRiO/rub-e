@@ -11,7 +11,7 @@
 //! # use etib_scene::*;
 //! # fn go(device: &etib_core::Device, encoder: &mut etib_core::Encoder) -> Result<()> {
 //! let cubes = load_model("world.model")?;
-//! let mut scene = Scene::new(device, &cubes, 1024, 1280, 800);
+//! let mut scene = Scene::new(device, &cubes, cubes.len(), 1024, 1280, 800);
 //! let ship = scene.add_dynamic(DynamicModel::load("ship.model")?)?;
 //!
 //! let mut camera = Camera::new(

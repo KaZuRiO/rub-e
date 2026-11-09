@@ -52,7 +52,7 @@ impl SoundsDemo {
         );
         let fly = FlyCamera::new(10.0, &camera);
 
-        let mut scene = Scene::new(&gpu.device, &[], 1, width, height);
+        let mut scene = Scene::new(&gpu.device, &[], 0, 1, width, height);
         scene
             .set_skybox_from_hdr(&gpu.device, SKY, SKY_FACE, Mat4::IDENTITY)
             .context("loading the skybox")?;
