@@ -157,6 +157,29 @@ fn rounded_cell(position: Vec3) -> [i32; 3] {
     position.round().as_ivec3().to_array()
 }
 
+/// The off-grid cubes of the chunks from `low` to `high`, as (chunk, place in
+/// its list, cell they round to), chunk by chunk.
+fn off_grid_near(
+    chunks: &BTreeMap<ChunkKey, Chunk>,
+    low: ChunkKey,
+    high: ChunkKey,
+) -> Vec<(ChunkKey, usize, [i32; 3])> {
+    let mut near = Vec::new();
+    for (&key, chunk) in chunks.range([low[0], i32::MIN, i32::MIN]..=[high[0], i32::MAX, i32::MAX])
+    {
+        if (0..3).all(|axis| (low[axis]..=high[axis]).contains(&key[axis])) {
+            near.extend(
+                chunk
+                    .off_grid
+                    .iter()
+                    .enumerate()
+                    .map(|(place, cube)| (key, place, rounded_cell(cube.position))),
+            );
+        }
+    }
+    near
+}
+
 /// Looks up the colour of cells one after the other, remembering the last
 /// chunk it found: neighbouring cells share one, and a tree walk is the cost
 /// to avoid.
@@ -266,27 +289,13 @@ impl World {
             chunk_of_cell(min.saturating_sub(IVec3::ONE)),
             chunk_of_cell(max.saturating_add(IVec3::ONE)),
         );
-        // The off-grid cubes there, as (chunk, place in its list, cell they
-        // round to). With the blocks, their cells are the only ones a removal
-        // can empty: most of a blast is air, and skipping it keeps a large
-        // removal from stalling the frame. Usually there are none.
-        let mut near = Vec::new();
-        for (&key, chunk) in self
-            .chunks
-            .range([low[0], i32::MIN, i32::MIN]..=[high[0], i32::MAX, i32::MAX])
-        {
-            if (0..3).all(|axis| (low[axis]..=high[axis]).contains(&key[axis])) {
-                near.extend(
-                    chunk
-                        .off_grid
-                        .iter()
-                        .enumerate()
-                        .map(|(place, cube)| (key, place, rounded_cell(cube.position))),
-                );
-            }
-        }
-        let near_cells: BTreeSet<[i32; 3]> = near.iter().map(|&(_, _, cell)| cell).collect();
-
+        // The off-grid cubes near the box, as (chunk, place in its list, cell
+        // they round to), found at the first removal: a box that only sets
+        // blocks never needs them. With the blocks, their cells are the only
+        // ones a removal can empty: most of a blast is air, and skipping it
+        // keeps a large removal from stalling the frame. Usually there are
+        // none.
+        let mut near: Option<(Vec<_>, BTreeSet<[i32; 3]>)> = None;
         let mut sets = Vec::new();
         let mut removes = Vec::new();
         // The cells where a removal meets an off-grid cube.
@@ -318,6 +327,11 @@ impl World {
                                 removed_blocks += 1;
                                 removes.push(cell);
                             }
+                            let (_, near_cells) = near.get_or_insert_with(|| {
+                                let near = off_grid_near(&self.chunks, low, high);
+                                let cells = near.iter().map(|&(_, _, cell)| cell).collect();
+                                (near, cells)
+                            });
                             if near_cells.contains(&cell.to_array()) {
                                 off_grid_hits.insert(cell.to_array());
                             }
@@ -329,7 +343,7 @@ impl World {
 
         // The off-grid cubes to drop, grouped by chunk, each group by place.
         let mut doomed: Vec<(ChunkKey, Vec<usize>)> = Vec::new();
-        for (key, place, cell) in near {
+        for (key, place, cell) in near.map(|(near, _)| near).unwrap_or_default() {
             if !off_grid_hits.contains(&cell) {
                 continue;
             }
