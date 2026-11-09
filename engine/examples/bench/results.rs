@@ -21,6 +21,10 @@ pub struct ScenarioInfo {
     pub kept_cubes: u32,
     #[serde(default)]
     pub dynamic_cubes: u32,
+    /// The longest run of measured frames that ended with a chunk edit still
+    /// off screen; 0 for runs that edit nothing, or saved before it existed.
+    #[serde(default)]
+    pub rebuild_frames: u32,
 }
 
 fn terrain() -> String {
@@ -137,6 +141,7 @@ pub mod tests {
                 generated_cubes: 5000,
                 kept_cubes: 4000,
                 dynamic_cubes: 0,
+                rebuild_frames: 0,
             },
             gpu_timing: true,
             cpu_frame: s(5.0),

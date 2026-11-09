@@ -5,7 +5,7 @@
 use std::ops::Range;
 
 use clap::ValueEnum;
-use etib_scene::glam::Vec3;
+use etib_scene::glam::{IVec3, Vec3};
 use etib_scene::{DynamicModel, ModelCube};
 
 /// Bumped whenever the world or the path changes, so results of different
@@ -59,6 +59,12 @@ pub enum Scenario {
     Moving,
     /// The same swarm with a single model moving each frame.
     FewChanges,
+    /// The terrain, with four surface blocks near the camera toggled every
+    /// frame, each in its own chunk: players breaking and placing blocks.
+    EditBlocks,
+    /// The terrain, with a ball of it blown away in front of the camera every
+    /// 120 frames and put back 60 frames later: explosions.
+    EditArea,
 }
 
 impl Scenario {
@@ -69,13 +75,15 @@ impl Scenario {
             Self::Scattered => "scattered",
             Self::Moving => "moving",
             Self::FewChanges => "few-changes",
+            Self::EditBlocks => "edit-blocks",
+            Self::EditArea => "edit-area",
         }
     }
 
     /// The static cubes of the scene.
     pub fn static_cubes(self) -> Vec<ModelCube> {
         match self {
-            Self::Terrain => world(),
+            Self::Terrain | Self::EditBlocks | Self::EditArea => world(),
             Self::Scattered => scattered(),
             Self::Moving | Self::FewChanges => Vec::new(),
         }
@@ -85,15 +93,25 @@ impl Scenario {
     /// [`moved_models`](Self::moved_models) counts them.
     pub fn models(self) -> Vec<DynamicModel> {
         match self {
-            Self::Terrain | Self::Scattered => Vec::new(),
+            Self::Terrain | Self::Scattered | Self::EditBlocks | Self::EditArea => Vec::new(),
             Self::Moving | Self::FewChanges => (0..SWARM_MODELS).map(swarm_model).collect(),
+        }
+    }
+
+    /// The static capacity the scene is built with for `cubes` static cubes:
+    /// 10 % to spare for the scenarios that edit them, so a scene full to the
+    /// brim never skews their numbers.
+    pub fn static_capacity(self, cubes: usize) -> usize {
+        match self {
+            Self::EditBlocks | Self::EditArea => cubes * 11 / 10,
+            _ => cubes,
         }
     }
 
     /// The models that move on `frame`.
     pub fn moved_models(self, frame: u32) -> Range<usize> {
         match self {
-            Self::Terrain | Self::Scattered => 0..0,
+            Self::Terrain | Self::Scattered | Self::EditBlocks | Self::EditArea => 0..0,
             Self::Moving => 0..SWARM_MODELS,
             Self::FewChanges => {
                 let index = frame as usize % SWARM_MODELS;
@@ -194,14 +212,7 @@ fn world() -> Vec<ModelCube> {
     for x in -SIDE / 2..SIDE / 2 {
         for z in -SIDE / 2..SIDE / 2 {
             let (fx, fz) = (x as f32, z as f32);
-            let relief = (fx * 0.08).sin() * 0.7
-                + (fz * 0.08).cos() * 0.7
-                + (fx * 0.02 + fz * 0.02).sin() * 1.5
-                + (fx * 0.06).sin() * (fz * 0.06).cos() * 0.5;
-            let mut top = 8 + (relief * 2.0).round() as i32;
-            if let Some(height) = tower_height(x, z) {
-                top = top.max(height);
-            }
+            let top = top(x, z);
             for y in 0..=top {
                 cubes.push(ModelCube {
                     position: Vec3::new(fx, y as f32, fz),
@@ -211,6 +222,83 @@ fn world() -> Vec<ModelCube> {
         }
     }
     cubes
+}
+
+/// The height of the highest cube of column `(x, z)`: the rolling surface, or
+/// the tower that rises out of it.
+fn top(x: i32, z: i32) -> i32 {
+    let (fx, fz) = (x as f32, z as f32);
+    let relief = (fx * 0.08).sin() * 0.7
+        + (fz * 0.08).cos() * 0.7
+        + (fx * 0.02 + fz * 0.02).sin() * 1.5
+        + (fx * 0.06).sin() * (fz * 0.06).cos() * 0.5;
+    let top = 8 + (relief * 2.0).round() as i32;
+    tower_height(x, z).map_or(top, |height| top.max(height))
+}
+
+/// The colour of the terrain's block in `cell`, or `None` where the terrain
+/// has none: outside it, or above its surface.
+pub fn terrain_block(cell: IVec3) -> Option<Vec3> {
+    let across = -SIDE / 2..SIDE / 2;
+    if !across.contains(&cell.x) || !across.contains(&cell.z) || cell.y < 0 {
+        return None;
+    }
+    let top = top(cell.x, cell.z);
+    (cell.y <= top).then(|| color(cell.x, cell.y, cell.z, top))
+}
+
+/// How far from the camera, along X and Z, `edit-blocks` picks its blocks.
+const EDIT_OFFSET: i32 = 20;
+
+/// A column of the terrain near `position`, far enough inside it that a
+/// column [`EDIT_OFFSET`] away on either side still is.
+fn column_near(position: Vec3) -> (i32, i32) {
+    let inside =
+        |v: f32| (v.round() as i32).clamp(-SIDE / 2 + EDIT_OFFSET, SIDE / 2 - 1 - EDIT_OFFSET);
+    (inside(position.x), inside(position.z))
+}
+
+/// The four surface blocks `edit-blocks` toggles on `frame`, with their
+/// colour in the terrain: around the camera, 40 columns apart so each is in
+/// its own chunk. The same four for two frames in a row, so each is removed
+/// and then put back.
+pub fn edit_blocks(frame: u32) -> [(IVec3, Vec3); 4] {
+    let (x, z) = column_near(camera_at(frame & !1).0);
+    [(-1, -1), (-1, 1), (1, -1), (1, 1)].map(|(dx, dz)| {
+        let (x, z) = (x + dx * EDIT_OFFSET, z + dz * EDIT_OFFSET);
+        let top = top(x, z);
+        (IVec3::new(x, top, z), color(x, top, z, top))
+    })
+}
+
+/// What `edit-area` does to its ball.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AreaEdit {
+    /// Empties every cell of the ball.
+    Remove,
+    /// Puts the terrain back in it.
+    Restore,
+}
+
+/// The radius of the `edit-area` ball, in cells.
+pub const AREA_RADIUS: i32 = 32;
+
+/// Frames between two explosions of `edit-area`; the terrain comes back half
+/// way through.
+const AREA_PERIOD: u32 = 120;
+
+/// What `edit-area` does on `frame`, and the centre of its ball: on the
+/// surface where the camera looks when the period starts.
+pub fn area_edit(frame: u32) -> Option<(AreaEdit, IVec3)> {
+    let edit = match frame % AREA_PERIOD {
+        0 => AreaEdit::Remove,
+        p if p == AREA_PERIOD / 2 => AreaEdit::Restore,
+        _ => return None,
+    };
+    let target = camera_at(frame - frame % AREA_PERIOD).1;
+    let inside = |v: f32| (v.round() as i32).clamp(-SIDE / 2, SIDE / 2 - 1);
+    let (x, z) = (inside(target.x), inside(target.z));
+    Some((edit, IVec3::new(x, top(x, z), z)))
 }
 
 /// Height of the tower covering column `(x, z)`, if any. Heights vary from
@@ -268,7 +356,9 @@ pub fn camera_at(frame: u32) -> (Vec3, Vec3) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
+
+    use etib_scene::glam::IVec3;
 
     use super::*;
 
@@ -297,12 +387,72 @@ mod tests {
         assert!(buried * 2 > set.len());
     }
 
-    const ALL: [Scenario; 4] = [
+    const ALL: [Scenario; 6] = [
         Scenario::Terrain,
         Scenario::Scattered,
         Scenario::Moving,
         Scenario::FewChanges,
+        Scenario::EditBlocks,
+        Scenario::EditArea,
     ];
+
+    #[test]
+    fn the_edit_scenarios_start_from_the_terrain() {
+        assert_eq!(Scenario::EditBlocks.static_cubes(), world());
+        assert_eq!(Scenario::EditArea.static_cubes(), world());
+        assert!(Scenario::EditBlocks.models().is_empty());
+        assert!(Scenario::EditArea.models().is_empty());
+    }
+
+    #[test]
+    fn the_edit_scenarios_leave_room() {
+        assert_eq!(Scenario::EditBlocks.static_capacity(100), 110);
+        assert_eq!(Scenario::EditArea.static_capacity(100), 110);
+        assert_eq!(Scenario::Terrain.static_capacity(100), 100);
+    }
+
+    #[test]
+    fn edit_blocks_touches_four_chunks_of_the_surface_every_frame() {
+        for frame in 0..WARMUP_FRAMES + MEASURED_FRAMES + GRACE_FRAMES {
+            let cells = edit_blocks(frame);
+            let chunks: HashSet<_> = cells
+                .iter()
+                .map(|(c, _)| c.div_euclid(IVec3::splat(32)).to_array())
+                .collect();
+            assert_eq!(chunks.len(), 4, "frame {frame}");
+            assert!(
+                cells
+                    .iter()
+                    .all(|(c, color)| terrain_block(*c) == Some(*color)),
+                "frame {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_blocks_uses_the_same_cells_two_frames_in_a_row() {
+        assert_eq!(edit_blocks(10), edit_blocks(11));
+        assert_ne!(edit_blocks(300), edit_blocks(400));
+    }
+
+    #[test]
+    fn a_zone_is_removed_then_restored_at_the_same_place() {
+        let (remove, centre) = area_edit(120).unwrap();
+        assert!(matches!(remove, AreaEdit::Remove));
+        let (restore, back) = area_edit(180).unwrap();
+        assert!(matches!(restore, AreaEdit::Restore));
+        assert_eq!(centre, back);
+        assert!(area_edit(121).is_none());
+    }
+
+    #[test]
+    fn terrain_block_knows_the_world() {
+        for cube in world().iter().step_by(997) {
+            assert_eq!(terrain_block(cube.position.as_ivec3()), Some(cube.color));
+        }
+        assert_eq!(terrain_block(IVec3::new(0, -1, 0)), None);
+        assert_eq!(terrain_block(IVec3::new(0, 200, 0)), None);
+    }
 
     #[test]
     fn every_scenario_builds_the_same_thing_every_time() {
