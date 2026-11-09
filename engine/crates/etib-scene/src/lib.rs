@@ -40,6 +40,7 @@ mod error;
 mod model;
 mod scene;
 mod skybox;
+mod slots;
 mod world;
 
 pub use camera::{Camera, CameraController, CameraMode, CameraRaw, Move, Projection};
