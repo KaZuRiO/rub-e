@@ -116,6 +116,7 @@ pub mod tests {
             median_ms: m,
             p95_ms: m * 1.5,
             mean_ms: m,
+            max_ms: Some(m * 2.0),
             samples: 100,
         };
         RunResults {
@@ -146,6 +147,14 @@ pub mod tests {
 
     fn temp(test: &str) -> PathBuf {
         std::env::temp_dir().join(format!("etib-bench-{}-{test}", std::process::id()))
+    }
+
+    #[test]
+    fn a_run_saved_before_max_ms_has_none() {
+        let mut json = serde_json::to_value(sample_run("old")).unwrap();
+        json["cpu_frame"].as_object_mut().unwrap().remove("max_ms");
+        let run: RunResults = serde_json::from_value(json).unwrap();
+        assert_eq!(run.cpu_frame.max_ms, None);
     }
 
     #[test]

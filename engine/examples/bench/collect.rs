@@ -14,10 +14,14 @@ pub struct Summary {
     pub median_ms: f32,
     pub p95_ms: f32,
     pub mean_ms: f32,
+    /// The slowest sample, where a one-off stall shows that the median and
+    /// p95 hide. `None` in runs saved before it was recorded.
+    #[serde(default)]
+    pub max_ms: Option<f32>,
     pub samples: u32,
 }
 
-/// Median, nearest-rank 95th percentile and mean; `None` when empty.
+/// Median, nearest-rank 95th percentile, mean and maximum; `None` when empty.
 pub fn summarize(samples: &[f32]) -> Option<Summary> {
     if samples.is_empty() {
         return None;
@@ -37,6 +41,7 @@ pub fn summarize(samples: &[f32]) -> Option<Summary> {
         median_ms,
         p95_ms,
         mean_ms,
+        max_ms: Some(sorted[n - 1]),
         samples: n as u32,
     })
 }
@@ -157,6 +162,7 @@ impl Collector {
             median_ms: 0.0,
             p95_ms: 0.0,
             mean_ms: 0.0,
+            max_ms: None,
             samples: 0,
         };
         Measurements {
@@ -205,6 +211,11 @@ mod tests {
             c.frame_rendered(1000 + f as u64, f, 0.002, (1280, 720))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn the_summary_keeps_the_slowest_sample() {
+        assert_eq!(summarize(&[4.0, 1.0, 9.0, 2.0]).unwrap().max_ms, Some(9.0));
     }
 
     #[test]
