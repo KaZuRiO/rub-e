@@ -40,6 +40,7 @@ mod error;
 mod model;
 mod scene;
 mod skybox;
+mod world;
 
 pub use camera::{Camera, CameraController, CameraMode, CameraRaw, Move, Projection};
 pub use cube::{CubeRaw, INDICES, VERTICES, Vertex};
@@ -47,5 +48,6 @@ pub use dynamic::{DynamicId, DynamicModel};
 pub use error::{Error, Result};
 pub use model::{ModelCube, load_model, parse_model, save_model};
 pub use scene::Scene;
+pub use world::BlockEdit;
 
 pub use glam;
