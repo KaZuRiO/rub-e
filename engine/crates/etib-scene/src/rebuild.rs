@@ -5,6 +5,8 @@
 //! freezes the image. Counting in cubes rather than milliseconds keeps a run
 //! the same every time.
 
+use std::collections::VecDeque;
+
 use crate::culling::ChunkKey;
 pub(crate) use crate::world::Priority;
 
@@ -43,12 +45,14 @@ impl Candidate {
 /// The chunks to write this frame, in the order to write them, given `free`
 /// slots on the GPU and a `budget` of cubes for the region edits.
 ///
-/// Immediate chunks all go, first, whatever the budget. One without room pulls
-/// the nearest shrinking budget chunks in before it until it has some; those
-/// spend the budget. Budget chunks then go nearest first while the budget
-/// lasts; the first of the frame goes even past it, so a budget of zero still
-/// makes progress. One without room waits aside, and any write that frees
-/// slots gives the chunks set aside another try first.
+/// Immediate chunks all go, first, whatever the budget: those that do not
+/// grow before those that do, so a block broken far away makes room for one
+/// placed nearby. One still without room pulls the nearest shrinking budget
+/// chunks in before it until it has some; those spend the budget. Budget
+/// chunks then go nearest first while the budget lasts; the first of the frame
+/// goes even past it, so a budget of zero still makes progress. One without
+/// room pulls the nearest waiting shrinking chunk ahead of it, whatever its
+/// distance, until it has some.
 pub(crate) fn plan_rebuilds(candidates: &[Candidate], free: u32, budget: u32) -> Vec<ChunkKey> {
     let mut order: Vec<&Candidate> = candidates.iter().collect();
     order.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.key.cmp(&b.key)));
@@ -56,19 +60,22 @@ pub(crate) fn plan_rebuilds(candidates: &[Candidate], free: u32, budget: u32) ->
     let mut room = i64::from(free);
     let mut budget = i64::from(budget);
     let mut plan = Vec::new();
-    let mut waiting: Vec<&Candidate> = order
+    let mut waiting: VecDeque<&Candidate> = order
         .iter()
         .copied()
         .filter(|c| c.priority == Priority::Budget)
         .collect();
     let mut budget_used = false;
 
-    for chunk in order.iter().filter(|c| c.priority == Priority::Immediate) {
+    let immediate = || order.iter().filter(|c| c.priority == Priority::Immediate);
+    let steady = immediate().filter(|c| c.new_len <= c.old_len);
+    let growing = immediate().filter(|c| c.new_len > c.old_len);
+    for chunk in steady.chain(growing) {
         while !chunk.fits(room) {
             let Some(at) = waiting.iter().position(|c| c.shrinks()) else {
                 break;
             };
-            let shrinking = waiting.remove(at);
+            let shrinking = waiting.remove(at).expect("found above");
             room += i64::from(shrinking.old_len) - i64::from(shrinking.new_len);
             budget -= shrinking.cost();
             budget_used = true;
@@ -80,21 +87,15 @@ pub(crate) fn plan_rebuilds(candidates: &[Candidate], free: u32, budget: u32) ->
         }
     }
 
-    let mut aside: Vec<&Candidate> = Vec::new();
-    let mut queue = waiting.into_iter();
-    let mut retry: Vec<&Candidate> = Vec::new();
-    loop {
-        // The chunks set aside get the first look after a write freed slots.
-        let chunk = if retry.is_empty() {
-            match queue.next() {
-                Some(chunk) => chunk,
-                None => break,
-            }
-        } else {
-            retry.remove(0)
-        };
+    while let Some(chunk) = waiting.pop_front() {
         if !chunk.fits(room) {
-            aside.push(chunk);
+            // The nearest shrinking chunk goes ahead of it, then it tries
+            // again; with none left, it waits for a later frame.
+            if let Some(at) = waiting.iter().position(|c| c.shrinks()) {
+                let shrinking = waiting.remove(at).expect("found above");
+                waiting.push_front(chunk);
+                waiting.push_front(shrinking);
+            }
             continue;
         }
         if budget_used && chunk.cost() > budget {
@@ -104,9 +105,6 @@ pub(crate) fn plan_rebuilds(candidates: &[Candidate], free: u32, budget: u32) ->
         budget -= chunk.cost();
         budget_used = true;
         plan.push(chunk.key);
-        if chunk.shrinks() {
-            retry.append(&mut aside);
-        }
     }
     plan
 }
@@ -179,5 +177,21 @@ mod tests {
             chunk(9, Budget, 500, 0),
         ];
         assert_eq!(plan_rebuilds(&c, 0, 10), [[8, 0, 0], [1, 0, 0]]);
+    }
+
+    #[test]
+    fn immediate_chunks_that_shrink_make_room_for_those_that_grow() {
+        let c = [chunk(1, Immediate, 0, 1), chunk(9, Immediate, 1, 0)];
+        assert_eq!(plan_rebuilds(&c, 0, 10), [[9, 0, 0], [1, 0, 0]]);
+    }
+
+    #[test]
+    fn a_waiting_chunk_pulls_shrinking_chunks_ahead_whatever_their_distance() {
+        let c = [
+            chunk(1, Budget, 0, 50),
+            chunk(2, Budget, 0, 40),
+            chunk(9, Budget, 50, 0),
+        ];
+        assert_eq!(plan_rebuilds(&c, 40, 100), [[9, 0, 0], [1, 0, 0]]);
     }
 }
