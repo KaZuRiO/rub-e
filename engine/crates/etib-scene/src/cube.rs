@@ -151,10 +151,6 @@ impl CubeRaw {
 /// `linear` clamped to 0..1, sRGB-encoded and rounded to 8 bits per channel,
 /// red in the low byte and an opaque alpha in the high one: what WGSL's
 /// `unpack4x8unorm` reads back.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the dense world in the next task")
-)]
 pub(crate) fn pack_srgb8(linear: Vec3) -> u32 {
     let [r, g, b] = linear.to_array().map(|channel| u32::from(srgb8(channel)));
     r | g << 8 | b << 16 | 0xFF << 24
@@ -162,10 +158,6 @@ pub(crate) fn pack_srgb8(linear: Vec3) -> u32 {
 
 /// The linear RGB behind the three low bytes of `packed`, the inverse of
 /// [`pack_srgb8`]. The alpha byte is ignored.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the dense world in the next task")
-)]
 pub(crate) fn unpack_srgb8(packed: u32) -> Vec3 {
     let [r, g, b, _] = packed.to_le_bytes();
     let [r, g, b] = [r, g, b].map(|byte| {

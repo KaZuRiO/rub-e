@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{IVec3, Mat4, Vec3};
 
-use crate::cube::CubeRaw;
+use crate::cube::{CubeRaw, pack_srgb8, unpack_srgb8};
 use crate::culling::{CHUNK_SIZE, ChunkKey, chunk_of};
 use crate::error::{Error, Result};
 use crate::model::ModelCube;
@@ -19,7 +19,10 @@ use crate::model::ModelCube;
 pub enum BlockEdit {
     /// Leaves the cell as it is.
     Keep,
-    /// Puts a block of this linear RGB colour in the cell, replacing any.
+    /// Puts a block of this linear RGB colour in the cell, replacing any. The
+    /// block keeps the colour as drawn, in sRGB with 8 bits per channel
+    /// clamped to 0..1; a colour that encodes like the one in place changes
+    /// nothing.
     Set(Vec3),
     /// Empties the cell, along with any off-grid cube whose centre rounds to it.
     Remove,
@@ -34,19 +37,94 @@ pub(crate) enum Priority {
     Immediate,
 }
 
-/// The cubes of one chunk.
-#[derive(Default)]
+/// Cells along one side of a chunk.
+const SIDE: i32 = 32;
+/// Cells in a chunk.
+const CELLS: usize = 32 * 32 * 32;
+
+/// Where a cell sits in its chunk: `x + 32·y + 1024·z` on its position within
+/// the chunk, which is never negative.
+fn local_index(cell: IVec3) -> usize {
+    let local = cell.rem_euclid(IVec3::splat(SIDE)).as_uvec3();
+    usize::try_from(local.x + 32 * local.y + 1024 * local.z).expect("below 32^3")
+}
+
+/// The cell at `index` in chunk `key`, the inverse of [`local_index`].
+fn cell_at(key: ChunkKey, index: usize) -> IVec3 {
+    let index = i32::try_from(index).expect("below 32^3");
+    let local = IVec3::new(index % 32, index / 32 % 32, index / 1024);
+    IVec3::from_array(key) * SIDE + local
+}
+
+/// The cubes of one chunk: its blocks as a mask of the cells that hold one
+/// and a colour for each, so that the instances come out in cell order
+/// whatever order the blocks were placed in.
 struct Chunk {
-    /// The blocks, by cell. Ordered, so the instances come out the same way
-    /// whatever order the blocks were placed in.
-    blocks: BTreeMap<[i32; 3], Vec3>,
+    /// One bit per cell, set where there is a block.
+    occupied: Box<[u64; CELLS / 64]>,
+    /// The colour of each block as drawn (see [`pack_srgb8`]); meaningless for
+    /// an empty cell.
+    colors: Box<[u32]>,
+    /// How many bits of `occupied` are set.
+    blocks: u32,
     /// Cubes off the grid, in the order they were given.
     off_grid: Vec<ModelCube>,
 }
 
+impl Default for Chunk {
+    fn default() -> Self {
+        Self {
+            occupied: Box::new([0; CELLS / 64]),
+            colors: vec![0; CELLS].into_boxed_slice(),
+            blocks: 0,
+            off_grid: Vec::new(),
+        }
+    }
+}
+
 impl Chunk {
     fn len(&self) -> usize {
-        self.blocks.len() + self.off_grid.len()
+        self.blocks as usize + self.off_grid.len()
+    }
+
+    fn color(&self, index: usize) -> Option<u32> {
+        (self.occupied[index / 64] >> (index % 64) & 1 == 1).then(|| self.colors[index])
+    }
+
+    /// Puts a colour in a cell; `true` if the cell was empty.
+    fn insert(&mut self, index: usize, packed: u32) -> bool {
+        let word = &mut self.occupied[index / 64];
+        let bit = 1 << (index % 64);
+        let was_empty = *word & bit == 0;
+        *word |= bit;
+        self.colors[index] = packed;
+        self.blocks += u32::from(was_empty);
+        was_empty
+    }
+
+    /// Empties a cell; `true` if it held a block.
+    fn remove(&mut self, index: usize) -> bool {
+        let word = &mut self.occupied[index / 64];
+        let bit = 1 << (index % 64);
+        let was_full = *word & bit != 0;
+        *word &= !bit;
+        self.blocks -= u32::from(was_full);
+        was_full
+    }
+
+    /// The cells holding a block, in increasing order.
+    fn indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.occupied.iter().enumerate().flat_map(|(word, &bits)| {
+            let mut bits = bits;
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                Some(word * 64 + bit)
+            })
+        })
     }
 }
 
@@ -74,6 +152,34 @@ fn on_grid(position: Vec3) -> bool {
     position == position.round()
 }
 
+/// The cell a position rounds to.
+fn rounded_cell(position: Vec3) -> [i32; 3] {
+    position.round().as_ivec3().to_array()
+}
+
+/// Looks up the colour of cells one after the other, remembering the last
+/// chunk it found: neighbouring cells share one, and a tree walk is the cost
+/// to avoid.
+struct Lookup<'a> {
+    chunks: &'a BTreeMap<ChunkKey, Chunk>,
+    last: Option<(ChunkKey, Option<&'a Chunk>)>,
+}
+
+impl Lookup<'_> {
+    fn color(&mut self, cell: IVec3) -> Option<u32> {
+        let key = chunk_of_cell(cell);
+        let chunk = match self.last {
+            Some((last, chunk)) if last == key => chunk,
+            _ => {
+                let chunk = self.chunks.get(&key);
+                self.last = Some((key, chunk));
+                chunk
+            }
+        };
+        chunk?.color(local_index(cell))
+    }
+}
+
 impl World {
     /// The world of `cubes`, with room for `capacity` cubes. A block given
     /// twice for the same cell keeps the last one. Nothing is marked to
@@ -88,7 +194,7 @@ impl World {
         for cube in cubes {
             if on_grid(cube.position) {
                 let cell = cube.position.as_ivec3();
-                world.put(cell, cube.color);
+                world.put(cell, pack_srgb8(cube.color));
             } else {
                 world
                     .chunks
@@ -112,14 +218,16 @@ impl World {
         self.count
     }
 
-    /// Puts or replaces the block of `cell`; the chunk is rebuilt at once.
+    /// Puts or replaces the block of `cell`; the chunk is rebuilt at once. A
+    /// colour that encodes like the one in place changes nothing.
     pub fn set_block(&mut self, cell: IVec3, color: Vec3) -> Result<()> {
-        match self.block(cell) {
-            Some(old) if old == color => return Ok(()),
+        let packed = pack_srgb8(color);
+        match self.packed(cell) {
+            Some(old) if old == packed => return Ok(()),
             Some(_) => {}
             None => self.check(self.count + 1)?,
         }
-        self.put(cell, color);
+        self.put(cell, packed);
         self.mark(chunk_of_cell(cell), Priority::Immediate);
         Ok(())
     }
@@ -132,13 +240,9 @@ impl World {
         }
     }
 
-    /// The colour of the block in `cell`.
+    /// The colour of the block in `cell`, as drawn.
     pub fn block(&self, cell: IVec3) -> Option<Vec3> {
-        self.chunks
-            .get(&chunk_of_cell(cell))?
-            .blocks
-            .get(&cell.to_array())
-            .copied()
+        self.packed(cell).map(unpack_srgb8)
     }
 
     /// Calls `edit` once for each cell of the box, `min` and `max` included,
@@ -162,25 +266,39 @@ impl World {
             chunk_of_cell(min.saturating_sub(IVec3::ONE)),
             chunk_of_cell(max.saturating_add(IVec3::ONE)),
         );
-        let inside =
-            |key: &ChunkKey| (0..3).all(|axis| (low[axis]..=high[axis]).contains(&key[axis]));
-        // The cells an off-grid cube nearby rounds to: with the blocks, the
-        // only cells a removal can empty. Most of a blast is air, and skipping
-        // it keeps a large removal from stalling the frame.
-        let off_grid_cells: BTreeSet<[i32; 3]> = self
+        // The off-grid cubes there, as (chunk, place in its list, cell they
+        // round to). With the blocks, their cells are the only ones a removal
+        // can empty: most of a blast is air, and skipping it keeps a large
+        // removal from stalling the frame. Usually there are none.
+        let mut near = Vec::new();
+        for (&key, chunk) in self
             .chunks
-            .iter()
-            .filter(|(key, _)| inside(key))
-            .flat_map(|(_, chunk)| &chunk.off_grid)
-            .map(|cube| cube.position.round().as_ivec3().to_array())
-            .collect();
+            .range([low[0], i32::MIN, i32::MIN]..=[high[0], i32::MAX, i32::MAX])
+        {
+            if (0..3).all(|axis| (low[axis]..=high[axis]).contains(&key[axis])) {
+                near.extend(
+                    chunk
+                        .off_grid
+                        .iter()
+                        .enumerate()
+                        .map(|(place, cube)| (key, place, rounded_cell(cube.position))),
+                );
+            }
+        }
+        let near_cells: BTreeSet<[i32; 3]> = near.iter().map(|&(_, _, cell)| cell).collect();
 
         let mut sets = Vec::new();
-        let mut removes = BTreeSet::new();
+        let mut removes = Vec::new();
+        // The cells where a removal meets an off-grid cube.
+        let mut off_grid_hits = BTreeSet::new();
         // Each cell is visited once and the world is not changed until the
         // scan ends, so these counts are exact.
         let mut added = 0;
         let mut removed_blocks = 0;
+        let mut lookup = Lookup {
+            chunks: &self.chunks,
+            last: None,
+        };
         for x in min.x..=max.x {
             for y in min.y..=max.y {
                 for z in min.z..=max.z {
@@ -188,19 +306,20 @@ impl World {
                     match edit(cell) {
                         BlockEdit::Keep => {}
                         BlockEdit::Set(color) => {
-                            if self.block(cell) != Some(color) {
-                                if self.block(cell).is_none() {
-                                    added += 1;
-                                }
-                                sets.push((cell, color));
+                            let packed = pack_srgb8(color);
+                            let old = lookup.color(cell);
+                            if old != Some(packed) {
+                                added += usize::from(old.is_none());
+                                sets.push((cell, packed));
                             }
                         }
                         BlockEdit::Remove => {
-                            if self.block(cell).is_some() {
+                            if lookup.color(cell).is_some() {
                                 removed_blocks += 1;
-                                removes.insert(cell.to_array());
-                            } else if off_grid_cells.contains(&cell.to_array()) {
-                                removes.insert(cell.to_array());
+                                removes.push(cell);
+                            }
+                            if near_cells.contains(&cell.to_array()) {
+                                off_grid_hits.insert(cell.to_array());
                             }
                         }
                     }
@@ -208,54 +327,58 @@ impl World {
             }
         }
 
-        let mut off_grid_removed = Vec::new();
-        if !removes.is_empty() && !off_grid_cells.is_empty() {
-            for (&key, chunk) in &self.chunks {
-                if inside(&key)
-                    && chunk
-                        .off_grid
-                        .iter()
-                        .any(|cube| removes.contains(&cube.position.round().as_ivec3().to_array()))
-                {
-                    off_grid_removed.push(key);
-                }
+        // The off-grid cubes to drop, grouped by chunk, each group by place.
+        let mut doomed: Vec<(ChunkKey, Vec<usize>)> = Vec::new();
+        for (key, place, cell) in near {
+            if !off_grid_hits.contains(&cell) {
+                continue;
+            }
+            match doomed.last_mut() {
+                Some((last, places)) if *last == key => places.push(place),
+                _ => doomed.push((key, vec![place])),
             }
         }
-        let removed_off_grid: usize = off_grid_removed
-            .iter()
-            .map(|key| {
-                self.chunks[key]
-                    .off_grid
-                    .iter()
-                    .filter(|cube| removes.contains(&cube.position.round().as_ivec3().to_array()))
-                    .count()
-            })
-            .sum();
+        let removed_off_grid: usize = doomed.iter().map(|(_, places)| places.len()).sum();
 
         let needed = self.count + added - removed_blocks - removed_off_grid;
         self.check(needed)?;
 
-        for cell in &removes {
-            let cell = IVec3::from_array(*cell);
-            if self.take(cell) {
-                self.mark(chunk_of_cell(cell), Priority::Budget);
+        // Cells come in scan order, so runs of one chunk are long: one lookup
+        // and one mark for each, not for each cell.
+        for run in removes.chunk_by(|a, b| chunk_of_cell(*a) == chunk_of_cell(*b)) {
+            let key = chunk_of_cell(run[0]);
+            let chunk = self.chunks.get_mut(&key).expect("it held these blocks");
+            for &cell in run {
+                chunk.remove(local_index(cell));
             }
-        }
-        for key in off_grid_removed {
-            let chunk = self.chunks.get_mut(&key).expect("found above");
-            let before = chunk.off_grid.len();
-            chunk
-                .off_grid
-                .retain(|cube| !removes.contains(&cube.position.round().as_ivec3().to_array()));
-            self.count -= before - chunk.off_grid.len();
+            self.count -= run.len();
             if chunk.len() == 0 {
                 self.chunks.remove(&key);
             }
             self.mark(key, Priority::Budget);
         }
-        for (cell, color) in sets {
-            self.put(cell, color);
-            self.mark(chunk_of_cell(cell), Priority::Budget);
+        for (key, places) in doomed {
+            let chunk = self.chunks.get_mut(&key).expect("it held these cubes");
+            let mut places = places.into_iter().peekable();
+            let mut place = 0;
+            chunk.off_grid.retain(|_| {
+                let gone = places.next_if_eq(&place).is_some();
+                place += 1;
+                !gone
+            });
+            if chunk.len() == 0 {
+                self.chunks.remove(&key);
+            }
+            self.mark(key, Priority::Budget);
+        }
+        self.count -= removed_off_grid;
+        for run in sets.chunk_by(|a, b| chunk_of_cell(a.0) == chunk_of_cell(b.0)) {
+            let key = chunk_of_cell(run[0].0);
+            let chunk = self.chunks.entry(key).or_default();
+            for &(cell, packed) in run {
+                self.count += usize::from(chunk.insert(local_index(cell), packed));
+            }
+            self.mark(key, Priority::Budget);
         }
         Ok(())
     }
@@ -275,17 +398,20 @@ impl World {
         let block = |position: Vec3, color: Vec3| {
             CubeRaw::new(Mat4::from_translation(position), color.extend(1.0))
         };
-        chunk
-            .blocks
-            .iter()
-            .map(|(cell, color)| block(IVec3::from_array(*cell).as_vec3(), *color))
-            .chain(
-                chunk
-                    .off_grid
-                    .iter()
-                    .map(|cube| block(cube.position, cube.color)),
+        let mut instances = Vec::with_capacity(chunk.len());
+        instances.extend(chunk.indices().map(|index| {
+            block(
+                cell_at(key, index).as_vec3(),
+                unpack_srgb8(chunk.colors[index]),
             )
-            .collect()
+        }));
+        instances.extend(
+            chunk
+                .off_grid
+                .iter()
+                .map(|cube| block(cube.position, cube.color)),
+        );
+        instances
     }
 
     /// How many cubes chunk `key` holds.
@@ -317,12 +443,17 @@ impl World {
         Ok(())
     }
 
+    /// The colour of the block in `cell`, packed.
+    fn packed(&self, cell: IVec3) -> Option<u32> {
+        self.chunks
+            .get(&chunk_of_cell(cell))?
+            .color(local_index(cell))
+    }
+
     /// Puts a block without marking anything.
-    fn put(&mut self, cell: IVec3, color: Vec3) {
+    fn put(&mut self, cell: IVec3, packed: u32) {
         let chunk = self.chunks.entry(chunk_of_cell(cell)).or_default();
-        if chunk.blocks.insert(cell.to_array(), color).is_none() {
-            self.count += 1;
-        }
+        self.count += usize::from(chunk.insert(local_index(cell), packed));
     }
 
     /// Takes a block out without marking anything; `false` if there was none.
@@ -331,7 +462,7 @@ impl World {
         let Some(chunk) = self.chunks.get_mut(&key) else {
             return false;
         };
-        if chunk.blocks.remove(&cell.to_array()).is_none() {
+        if !chunk.remove(local_index(cell)) {
             return false;
         }
         self.count -= 1;
@@ -549,5 +680,36 @@ mod tests {
             bytemuck::cast_slice::<CubeRaw, u8>(&w.instances([0, 0, 0])).to_vec()
         };
         assert_eq!(build(&cells), build(&[cells[2], cells[0], cells[1]]));
+    }
+
+    #[test]
+    fn negative_cells_land_at_the_far_end_of_their_chunk() {
+        assert_eq!(local_index(IVec3::splat(-1)), CELLS - 1);
+        assert_eq!(cell_at([-1, -1, -1], CELLS - 1), IVec3::splat(-1));
+        assert_eq!(
+            cell_at([2, 0, -3], local_index(IVec3::new(70, 5, -90))),
+            IVec3::new(70, 5, -90)
+        );
+    }
+
+    #[test]
+    fn a_block_reads_back_its_colour_as_drawn() {
+        let mut w = world(1);
+        let c = Vec3::new(0.3, 0.6, 0.9);
+        w.set_block(IVec3::ZERO, c).unwrap();
+        assert_eq!(w.block(IVec3::ZERO), Some(unpack_srgb8(pack_srgb8(c))));
+    }
+
+    #[test]
+    fn a_colour_that_packs_the_same_marks_nothing() {
+        let mut w = world(1);
+        let c = Vec3::new(0.3, 0.6, 0.9);
+        assert_eq!(pack_srgb8(c + 1e-5), pack_srgb8(c));
+        w.set_block(IVec3::ZERO, c).unwrap();
+        w.clean([0, 0, 0]);
+        w.set_block(IVec3::ZERO, c + 1e-5).unwrap();
+        w.edit_region(IVec3::ZERO, IVec3::ZERO, |_| BlockEdit::Set(c + 1e-5))
+            .unwrap();
+        assert_eq!(w.dirty().count(), 0);
     }
 }

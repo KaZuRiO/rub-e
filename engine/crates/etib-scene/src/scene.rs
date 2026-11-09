@@ -203,6 +203,10 @@ impl Scene {
     /// change many at once, [`edit_region`](Self::edit_region) spreads the
     /// work over frames instead.
     ///
+    /// The block keeps the colour as drawn: sRGB with 8 bits per channel,
+    /// clamped to 0..1. Putting a colour that encodes like the one in place
+    /// does nothing.
+    ///
     /// # Errors
     ///
     /// [`Error::Capacity`](crate::Error::Capacity) if the scene would hold
@@ -219,7 +223,9 @@ impl Scene {
     }
 
     /// The colour of the block in `cell`, as of the last edit, even while the
-    /// screen still shows its chunk as it was.
+    /// screen still shows its chunk as it was. It is the colour as drawn, in
+    /// sRGB with 8 bits per channel clamped to 0..1, so it may differ a little
+    /// from the one given.
     pub fn block(&self, cell: IVec3) -> Option<Vec3> {
         self.world.block(cell)
     }

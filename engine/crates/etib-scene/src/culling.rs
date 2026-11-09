@@ -410,7 +410,9 @@ mod tests {
         assert_eq!(statics.chunk_ids.read_back(&device), [1, 2, 2, 3, 4]);
         let instances = statics.instances.read_back(&device);
         assert_eq!(instances[0].model[3], [-1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(instances[0].color, [0.5, 0.25, 1.0, 1.0]);
+        // Blocks are stored as drawn: 8-bit sRGB.
+        let drawn = crate::cube::unpack_srgb8(crate::cube::pack_srgb8(Vec3::new(0.5, 0.25, 1.0)));
+        assert_eq!(instances[0].color, drawn.extend(1.0).to_array());
     }
 
     #[test]
