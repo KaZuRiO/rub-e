@@ -1,7 +1,7 @@
 //! The cube every instance draws, and what each instance says about it.
 
 use etib_core::{StepMode, VertexAttribute, VertexFormat, VertexLayout};
-use glam::{Mat4, Vec4};
+use glam::{Mat4, Vec3, Vec4};
 
 /// One corner of the cube mesh. Mirrors `VertexInput` in `cube.wgsl`.
 #[repr(C)]
@@ -148,10 +148,59 @@ impl CubeRaw {
     };
 }
 
+/// `linear` clamped to 0..1, sRGB-encoded and rounded to 8 bits per channel,
+/// red in the low byte and an opaque alpha in the high one: what WGSL's
+/// `unpack4x8unorm` reads back.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the dense world in the next task")
+)]
+pub(crate) fn pack_srgb8(linear: Vec3) -> u32 {
+    let [r, g, b] = linear.to_array().map(|channel| u32::from(srgb8(channel)));
+    r | g << 8 | b << 16 | 0xFF << 24
+}
+
+/// The linear RGB behind the three low bytes of `packed`, the inverse of
+/// [`pack_srgb8`]. The alpha byte is ignored.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the dense world in the next task")
+)]
+pub(crate) fn unpack_srgb8(packed: u32) -> Vec3 {
+    let [r, g, b, _] = packed.to_le_bytes();
+    let [r, g, b] = [r, g, b].map(|byte| {
+        let encoded = f32::from(byte) / 255.0;
+        if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    Vec3::new(r, g, b)
+}
+
+/// One linear channel as an sRGB-encoded byte.
+fn srgb8(linear: f32) -> u8 {
+    let linear = if linear.is_nan() {
+        0.0
+    } else {
+        linear.clamp(0.0, 1.0)
+    };
+    let encoded = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "clamped to 0..1 above, so the rounded value is 0..=255"
+    )]
+    let byte = (encoded * 255.0).round() as u8;
+    byte
+}
+
 #[cfg(test)]
 mod tests {
-    use glam::Vec3;
-
     use super::*;
 
     #[test]
@@ -190,6 +239,54 @@ mod tests {
                 "triangle {triangle:?} faces inwards"
             );
         }
+    }
+
+    /// The sRGB decoding the static cube shader does.
+    fn srgb_to_linear(encoded: f32) -> f32 {
+        if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    #[test]
+    fn colours_pack_as_srgb_bytes() {
+        assert_eq!(pack_srgb8(Vec3::ONE), 0xFFFF_FFFF);
+        assert_eq!(pack_srgb8(Vec3::ZERO), 0xFF00_0000);
+        assert_eq!(pack_srgb8(Vec3::new(1.0, 0.0, 0.0)), 0xFF00_00FF);
+        assert_eq!(pack_srgb8(Vec3::new(0.0, 0.0, 1.0)), 0xFFFF_0000);
+        // Out of range is clamped.
+        assert_eq!(pack_srgb8(Vec3::new(2.0, -1.0, 0.0)), 0xFF00_00FF);
+    }
+
+    #[test]
+    fn dark_colours_survive_the_round_trip() {
+        for v in [0.002, 0.01, 0.05, 0.2, 0.5, 0.9] {
+            let byte = pack_srgb8(Vec3::splat(v)) & 0xFF;
+            let back = srgb_to_linear(byte as f32 / 255.0);
+            assert!((back - v).abs() <= v * 0.05 + 0.0005, "{v} -> {back}");
+        }
+    }
+
+    #[test]
+    fn every_byte_survives_a_round_trip() {
+        for byte in 0..=255u32 {
+            let packed = byte | byte << 8 | byte << 16 | 0xFF << 24;
+            assert_eq!(pack_srgb8(unpack_srgb8(packed)), packed, "{byte}");
+        }
+    }
+
+    #[test]
+    fn black_and_white_pack_exactly() {
+        assert_eq!(pack_srgb8(Vec3::ZERO), 0xFF00_0000);
+        assert_eq!(pack_srgb8(Vec3::ONE), 0xFFFF_FFFF);
+        assert_eq!(unpack_srgb8(0xFFFF_FFFF), Vec3::ONE);
+    }
+
+    #[test]
+    fn a_nan_channel_packs_to_zero() {
+        assert_eq!(pack_srgb8(Vec3::new(f32::NAN, 1.0, 0.0)) & 0xFF, 0);
     }
 
     #[test]
