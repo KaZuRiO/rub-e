@@ -821,6 +821,23 @@ mod tests {
     }
 
     #[test]
+    fn in_a_full_scene_a_block_broken_far_away_makes_room_for_one_placed_near() {
+        let Some(device) = device() else { return };
+        let cubes = [white_cube(0.0, 0.0, 0.0), white_cube(500.0, 0.0, 0.0)];
+        let mut scene = Scene::new(&device, &cubes, 2, 1, 64, 64);
+        render_once(&device, &mut scene);
+        scene.remove_block(IVec3::new(500, 0, 0));
+        scene.set_block(IVec3::X, Vec3::ONE).unwrap();
+        render_once(&device, &mut scene);
+        assert_eq!(scene.pending_rebuilds(), 0);
+        same_as_fresh(
+            &device,
+            &scene,
+            &[white_cube(0.0, 0.0, 0.0), white_cube(1.0, 0.0, 0.0)],
+        );
+    }
+
+    #[test]
     fn a_scene_emptied_and_refilled_matches_a_fresh_one() {
         let Some(device) = device() else { return };
         let cubes = [white_cube(0.0, 0.0, 0.0), white_cube(1.0, 0.0, 0.0)];
