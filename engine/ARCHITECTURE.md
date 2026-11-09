@@ -664,7 +664,7 @@ submission per frame — the scene records into the frame's encoder.
 |---|---|---|
 | `Camera` | the application | Plain maths, no GPU. `advance_frame()` once a frame; it remembers last frame's matrix for `prev_view_proj` |
 | `CameraController` | the application | Told which way to `Move`, how far the mouse went, how far the wheel turned; which keys mean what is the application's call |
-| Static cubes | the `Scene`, from construction | Sorted into 32×32 XZ chunks on the CPU once; none at all means no culling buffers are created |
+| Static cubes | the `Scene`, editable at runtime | Blocks in 32×32×32 chunks, held by a CPU `World` the game reads back at once; `set_block` reaches the GPU the next frame, `edit_region` within a per-frame budget in cubes, nearest chunks first; a fixed capacity in cubes, set at construction, and a capacity of 0 means no culling buffers are created |
 | Dynamic models | the `Scene`, by id | Slots are reused behind generational `DynamicId`s, so a removed model's id reaches nothing; a fixed capacity in cubes, set at construction |
 | Skybox | the `Scene`, optional | A `.hdr` is decoded on the CPU, projected onto a `TextureCube` by a compute pass at load time, then sampled linearly |
 
@@ -929,7 +929,10 @@ the binaries with `include_bytes!` so nothing has to be found at runtime.
 | `crates/etib-scene/src/cube.rs` | The cube mesh, `Vertex`, `CubeRaw` and their vertex layouts |
 | `crates/etib-scene/src/model.rs` | `.model` files: `ModelCube`, `parse_model`, `load_model`, `save_model` |
 | `crates/etib-scene/src/dynamic.rs` | `DynamicModel`, and the slots the scene keeps them in |
-| `crates/etib-scene/src/culling.rs` | Chunking on the CPU, the two culling passes, the static cubes' buffers |
+| `crates/etib-scene/src/culling.rs` | Chunk keys, the two culling passes, the static cubes' fixed-capacity buffers and the rebuild of one chunk |
+| `crates/etib-scene/src/world.rs` | `World`: the blocks by chunk, the capacity, which chunks wait for a rebuild; `BlockEdit` |
+| `crates/etib-scene/src/slots.rs` | `SlotAllocator`: the free slots of the static instance buffer, handed out in pieces |
+| `crates/etib-scene/src/rebuild.rs` | `plan_rebuilds`: which waiting chunks are written this frame; `DEFAULT_REBUILD_BUDGET` |
 | `crates/etib-scene/src/skybox.rs` | `.hdr` decoding, the equirectangular projection, the skybox pass |
 | `crates/etib-scene/src/shaders/` | `cube.wgsl`, `cull.wgsl`, `chunk_cull.wgsl`, `skybox.wgsl`, `equirectangular.wgsl` |
 | `crates/etib-input/src/input.rs` | `Input`: keyboard and mouse state, the per-frame cycle, focus loss |

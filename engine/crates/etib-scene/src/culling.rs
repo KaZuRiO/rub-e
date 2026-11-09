@@ -302,6 +302,23 @@ impl StaticCubes {
         self.placed.len()
     }
 
+    /// Every instance a chunk holds on the GPU, sorted by their bytes so two
+    /// scenes compare whatever slots they landed in.
+    #[cfg(test)]
+    pub fn live_instances(&self, device: &Device) -> Vec<CubeRaw> {
+        let ids = self.chunk_ids.read_back(device);
+        let mut live: Vec<CubeRaw> = self
+            .instances
+            .read_back(device)
+            .into_iter()
+            .zip(ids)
+            .filter(|(_, id)| *id != 0)
+            .map(|(cube, _)| cube)
+            .collect();
+        live.sort_by(|a, b| bytemuck::bytes_of(a).cmp(bytemuck::bytes_of(b)));
+        live
+    }
+
     /// Zeroes this frame's count. Queued, so it lands before the culling
     /// recorded after it in the same submission.
     pub fn reset(&self, device: &Device) {
