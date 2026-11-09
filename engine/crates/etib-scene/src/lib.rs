@@ -38,6 +38,7 @@ mod culling;
 mod dynamic;
 mod error;
 mod model;
+mod rebuild;
 mod scene;
 mod skybox;
 mod slots;
