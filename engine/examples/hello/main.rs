@@ -161,7 +161,14 @@ impl HelloApp {
         let (width, height) = gpu.size();
         let aspect = width as f32 / height as f32;
 
-        let mut scene = Scene::new(&gpu.device, static_cubes, cat.len(), width, height);
+        let mut scene = Scene::new(
+            &gpu.device,
+            static_cubes,
+            static_cubes.len(),
+            cat.len(),
+            width,
+            height,
+        );
         let orbiting = scene
             .add_dynamic(DynamicModel::from_cubes(cat.to_vec()))
             .expect("the scene has room for the cat");

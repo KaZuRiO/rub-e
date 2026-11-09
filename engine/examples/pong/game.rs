@@ -134,7 +134,7 @@ impl PongApp {
             + DYNAMIC_HEADROOM;
 
         let (walls, seats) = make_static_geometry();
-        let mut scene = Scene::new(&gpu.device, &walls, capacity, width, height);
+        let mut scene = Scene::new(&gpu.device, &walls, walls.len(), capacity, width, height);
         scene
             .set_skybox_from_hdr(
                 &gpu.device,
