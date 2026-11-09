@@ -155,8 +155,32 @@ impl World {
         if min.cmpgt(max).any() {
             return Ok(());
         }
+        // Off-grid cubes are stored by their centre, which is never more than
+        // half a cell from the cell it rounds to: one chunk around the box
+        // covers them all.
+        let (low, high) = (
+            chunk_of_cell(min.saturating_sub(IVec3::ONE)),
+            chunk_of_cell(max.saturating_add(IVec3::ONE)),
+        );
+        let inside =
+            |key: &ChunkKey| (0..3).all(|axis| (low[axis]..=high[axis]).contains(&key[axis]));
+        // The cells an off-grid cube nearby rounds to: with the blocks, the
+        // only cells a removal can empty. Most of a blast is air, and skipping
+        // it keeps a large removal from stalling the frame.
+        let off_grid_cells: BTreeSet<[i32; 3]> = self
+            .chunks
+            .iter()
+            .filter(|(key, _)| inside(key))
+            .flat_map(|(_, chunk)| &chunk.off_grid)
+            .map(|cube| cube.position.round().as_ivec3().to_array())
+            .collect();
+
         let mut sets = Vec::new();
         let mut removes = BTreeSet::new();
+        // Each cell is visited once and the world is not changed until the
+        // scan ends, so these counts are exact.
+        let mut added = 0;
+        let mut removed_blocks = 0;
         for x in min.x..=max.x {
             for y in min.y..=max.y {
                 for z in min.z..=max.z {
@@ -165,29 +189,29 @@ impl World {
                         BlockEdit::Keep => {}
                         BlockEdit::Set(color) => {
                             if self.block(cell) != Some(color) {
+                                if self.block(cell).is_none() {
+                                    added += 1;
+                                }
                                 sets.push((cell, color));
                             }
                         }
                         BlockEdit::Remove => {
-                            removes.insert(cell.to_array());
+                            if self.block(cell).is_some() {
+                                removed_blocks += 1;
+                                removes.insert(cell.to_array());
+                            } else if off_grid_cells.contains(&cell.to_array()) {
+                                removes.insert(cell.to_array());
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Off-grid cubes are stored by their centre, which is never more than
-        // half a cell from the cell it rounds to: one chunk around the box
-        // covers them all.
-        let (low, high) = (
-            chunk_of_cell(min.saturating_sub(IVec3::ONE)),
-            chunk_of_cell(max.saturating_add(IVec3::ONE)),
-        );
         let mut off_grid_removed = Vec::new();
-        if !removes.is_empty() {
+        if !removes.is_empty() && !off_grid_cells.is_empty() {
             for (&key, chunk) in &self.chunks {
-                let inside = (0..3).all(|axis| (low[axis]..=high[axis]).contains(&key[axis]));
-                if inside
+                if inside(&key)
                     && chunk
                         .off_grid
                         .iter()
@@ -208,14 +232,6 @@ impl World {
             })
             .sum();
 
-        let added = sets
-            .iter()
-            .filter(|(cell, _)| self.block(*cell).is_none())
-            .count();
-        let removed_blocks = removes
-            .iter()
-            .filter(|cell| self.block(IVec3::from_array(**cell)).is_some())
-            .count();
         let needed = self.count + added - removed_blocks - removed_off_grid;
         self.check(needed)?;
 
@@ -502,6 +518,20 @@ mod tests {
         assert_eq!(w.cube_count(), 1);
         let kept = w.instances([0, 0, 0]);
         assert_eq!(kept[0].model[3][0], 3.25);
+    }
+
+    #[test]
+    fn an_off_grid_cube_is_removed_from_the_chunk_next_to_its_cell() {
+        // Stored in chunk 0 by its centre, it rounds to cell 32, in chunk 1.
+        let cube = ModelCube {
+            position: Vec3::new(31.75, 0.25, 0.0),
+            color: RED,
+        };
+        let mut w = World::new(&[cube], 1);
+        let cell = IVec3::new(32, 0, 0);
+        w.edit_region(cell, cell, |_| BlockEdit::Remove).unwrap();
+        assert_eq!(w.cube_count(), 0);
+        assert!(w.instances([0, 0, 0]).is_empty());
     }
 
     #[test]
