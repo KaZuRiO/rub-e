@@ -1,7 +1,7 @@
 //! Frustum culling on the GPU, in two compute passes.
 //!
-//! The static cubes are grouped into chunks — 32×32 tiles in the XZ plane, of
-//! any height — once, on the CPU. Each frame the first pass tests every
+//! The static cubes are grouped into chunks — cubes of 32×32×32 world units —
+//! once, on the CPU. Each frame the first pass tests every
 //! chunk's bounding box against the camera and writes one flag per chunk; the
 //! second runs once per cube, skips those whose chunk is out of view, tests
 //! the rest one by one, and appends the survivors to `visible` while counting
@@ -18,7 +18,7 @@ use glam::{Mat4, Vec3};
 use crate::cube::{CubeRaw, INDICES};
 use crate::model::ModelCube;
 
-/// The side of a chunk in the XZ plane, in world units.
+/// The side of a chunk, in world units, on all three axes.
 pub(crate) const CHUNK_SIZE: f32 = 32.0;
 
 /// Threads per workgroup in both culling shaders.
@@ -52,15 +52,15 @@ pub(crate) struct StaticLayout {
 
 /// Sorts cubes into chunks and works out each chunk's bounds.
 ///
-/// Chunks come out in a fixed order, by tile, so the same cubes always give
+/// Chunks come out in a fixed order, by key, so the same cubes always give
 /// the same buffers.
 pub(crate) fn build_chunks(cubes: &[ModelCube]) -> StaticLayout {
-    let mut tiles: HashMap<(i32, i32), Vec<&ModelCube>> = HashMap::new();
+    let mut by_chunk: HashMap<ChunkKey, Vec<&ModelCube>> = HashMap::new();
     for cube in cubes {
-        let key = tile_of(cube.position);
-        tiles.entry(key).or_default().push(cube);
+        let key = chunk_of(cube.position);
+        by_chunk.entry(key).or_default().push(cube);
     }
-    let mut keys: Vec<_> = tiles.keys().copied().collect();
+    let mut keys: Vec<_> = by_chunk.keys().copied().collect();
     keys.sort_unstable();
 
     let mut layout = StaticLayout {
@@ -69,7 +69,7 @@ pub(crate) fn build_chunks(cubes: &[ModelCube]) -> StaticLayout {
         chunks: Vec::with_capacity(keys.len()),
     };
     for (index, key) in keys.iter().enumerate() {
-        let members = &tiles[key];
+        let members = &by_chunk[key];
         // The bounds of the cubes' faces, not of their centres.
         let (min, max) = members.iter().fold(
             (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
@@ -95,16 +95,14 @@ pub(crate) fn build_chunks(cubes: &[ModelCube]) -> StaticLayout {
     layout
 }
 
-/// The XZ tile a position falls in.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "a world 32 units a tile would need to be 2^36 units wide to overflow, and `as` saturates"
-)]
-fn tile_of(position: Vec3) -> (i32, i32) {
-    (
-        (position.x / CHUNK_SIZE).floor() as i32,
-        (position.z / CHUNK_SIZE).floor() as i32,
-    )
+/// A chunk, named by its position on the grid of chunks: the chunk `[1, 0, 0]`
+/// covers `32.0..64.0` in X and `0.0..32.0` in Y and Z.
+pub(crate) type ChunkKey = [i32; 3];
+
+/// The chunk a position falls in. Past `i32` chunks, which a world would need
+/// to be 2^36 units wide to reach, the key saturates.
+pub(crate) fn chunk_of(position: Vec3) -> ChunkKey {
+    (position / CHUNK_SIZE).floor().as_ivec3().to_array()
 }
 
 /// A number of cubes, chunks or indices as the `u32` the shaders count in.
@@ -276,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn cubes_are_grouped_by_tile() {
+    fn cubes_are_grouped_by_chunk() {
         let layout = build_chunks(&[
             cube(66.0, 0.0, 0.0),
             cube(0.0, 0.0, 0.0),
@@ -284,7 +282,7 @@ mod tests {
             cube(1.0, 5.0, 31.0),
             cube(-1.0, 0.0, 0.0),
         ]);
-        // Tiles (-1,0), (0,0), (1,0), (2,0), in that order.
+        // Chunks [-1,0,0], [0,0,0], [1,0,0], [2,0,0], in that order.
         assert_eq!(layout.chunks.len(), 4);
         assert_eq!(
             layout
@@ -298,6 +296,16 @@ mod tests {
         assert_eq!(layout.instances.len(), 5);
         assert_eq!(layout.instances[0].model[3], [-1.0, 0.0, 0.0, 1.0]);
         assert_eq!(layout.instances[0].color, [0.5, 0.25, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_tall_column_spans_several_chunks() {
+        let layout = build_chunks(&[
+            cube(0.0, 0.0, 0.0),
+            cube(0.0, 33.0, 0.0),
+            cube(0.0, -1.0, 0.0),
+        ]);
+        assert_eq!(layout.chunks.len(), 3);
     }
 
     #[test]
