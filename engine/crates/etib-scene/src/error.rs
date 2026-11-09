@@ -34,10 +34,10 @@ pub enum Error {
         /// The decoder's own error.
         source: Box<dyn StdError + Send + Sync>,
     },
-    /// A dynamic model that would take the scene past the number of dynamic
-    /// cubes it was built with room for.
+    /// A dynamic model, or an edit of the static scenery, that would take the
+    /// scene past the number of cubes of that kind it was built with room for.
     Capacity {
-        /// The cubes the models would hold with this one added.
+        /// The cubes there would be with the change made.
         needed: usize,
         /// The cubes the scene was built with room for.
         capacity: usize,
@@ -52,7 +52,7 @@ impl fmt::Display for Error {
             Self::Image { .. } => f.write_str("the skybox image could not be decoded"),
             Self::Capacity { needed, capacity } => write!(
                 f,
-                "the dynamic models would hold {needed} cubes, but the scene has room for {capacity}"
+                "the change would make {needed} cubes, but the scene has room for {capacity}"
             ),
         }
     }
