@@ -85,6 +85,10 @@ impl SlotAllocator {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::single_range_in_vec_init,
+    reason = "a list of pieces that happens to hold one"
+)]
 mod tests {
     use super::*;
 

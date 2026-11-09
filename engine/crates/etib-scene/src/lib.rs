@@ -49,6 +49,7 @@ pub use cube::{CubeRaw, INDICES, VERTICES, Vertex};
 pub use dynamic::{DynamicId, DynamicModel};
 pub use error::{Error, Result};
 pub use model::{ModelCube, load_model, parse_model, save_model};
+pub use rebuild::DEFAULT_REBUILD_BUDGET;
 pub use scene::Scene;
 pub use world::BlockEdit;
 

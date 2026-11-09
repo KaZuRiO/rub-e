@@ -6,16 +6,17 @@ use etib_core::{
     IndexBuffer, Load, RasterDesc, RenderPipeline, RenderTexture, Shader, Stage, StorageBuffer,
     StorageFormat, TextureView, UniformBuffer, VertexBuffer,
 };
-use glam::Mat4;
+use glam::{IVec3, Mat4, Vec3};
 
 use crate::camera::{Camera, CameraRaw};
 use crate::cube::{CubeRaw, INDICES, VERTICES, Vertex};
-use crate::culling::{CullingPasses, StaticCubes};
+use crate::culling::{CHUNK_SIZE, CullingPasses, StaticCubes};
 use crate::dynamic::{DynamicId, DynamicModel, DynamicModels};
 use crate::error::Result;
 use crate::model::ModelCube;
+use crate::rebuild::{Candidate, DEFAULT_REBUILD_BUDGET, plan_rebuilds};
 use crate::skybox::Skybox;
-use crate::world::World;
+use crate::world::{BlockEdit, World};
 
 /// What the scene is cleared to where neither a cube nor a skybox is drawn.
 const BACKGROUND: Color = Color::BLACK;
@@ -32,8 +33,11 @@ const BACKGROUND: Color = Color::BLACK;
 /// post.draw(device, encoder, frame.view, &grade, out);  // tone map
 /// ```
 ///
-/// Static cubes are fixed at construction and culled two-pass on the GPU.
-/// Dynamic models are added, moved and removed at runtime; they are few, so
+/// Static cubes are the scenery: blocks on a grid of cells, set and removed
+/// one by one with [`set_block`](Self::set_block) or a whole box at a time with
+/// [`edit_region`](Self::edit_region), within the static capacity given at
+/// construction, and culled two-pass on the GPU. Only the chunks an edit
+/// touched are sent again. Dynamic models are added, moved and removed at runtime; they are few, so
 /// they are drawn without culling.
 pub struct Scene {
     pipeline: RenderPipeline,
@@ -48,6 +52,8 @@ pub struct Scene {
     world: World,
     /// Their copy on the GPU; `None` for a static capacity of 0.
     statics: Option<StaticCubes>,
+    /// Cubes per frame rebuilt for region edits.
+    rebuild_budget: u32,
 
     dynamic: DynamicModels,
     dynamic_buffer: StorageBuffer<CubeRaw>,
@@ -127,6 +133,7 @@ impl Scene {
             culling,
             world,
             statics,
+            rebuild_budget: DEFAULT_REBUILD_BUDGET,
             dynamic: DynamicModels::new(dynamic_capacity),
             dynamic_buffer,
             dynamic_uploaded: 0,
@@ -190,6 +197,72 @@ impl Scene {
         self.dynamic.get_mut(id)
     }
 
+    /// Puts a block of linear RGB `color` in `cell`, replacing any. It is on
+    /// screen from the next frame: its chunk is rebuilt within that frame,
+    /// whatever the budget. That suits a player's few blocks a frame; to
+    /// change many at once, [`edit_region`](Self::edit_region) spreads the
+    /// work over frames instead.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Capacity`](crate::Error::Capacity) if the scene would hold
+    /// more static cubes than it was built with room for; nothing changes
+    /// then.
+    pub fn set_block(&mut self, cell: IVec3, color: Vec3) -> Result<()> {
+        self.world.set_block(cell, color)
+    }
+
+    /// Empties `cell`, on screen from the next frame. An empty cell is left
+    /// alone, and so are off-grid cubes.
+    pub fn remove_block(&mut self, cell: IVec3) {
+        self.world.remove_block(cell);
+    }
+
+    /// The colour of the block in `cell`, as of the last edit, even while the
+    /// screen still shows its chunk as it was.
+    pub fn block(&self, cell: IVec3) -> Option<Vec3> {
+        self.world.block(cell)
+    }
+
+    /// Calls `edit` for each cell of the box from `min` to `max`, both
+    /// included, and applies the answers as one edit. An off-grid cube
+    /// follows the answer for the cell its centre rounds to. A box with `min`
+    /// above `max` on any axis does nothing.
+    ///
+    /// The changed chunks reach the screen over the next frames, nearest the
+    /// camera first, within the [rebuild budget](Self::set_rebuild_budget):
+    /// an explosion never freezes the image, and until a chunk's turn comes
+    /// the screen shows it as it was. [`block`](Self::block) and
+    /// [`static_count`](Self::static_count) see the change at once.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Capacity`](crate::Error::Capacity) if the scene would hold
+    /// more static cubes than it was built with room for; nothing changes
+    /// then.
+    pub fn edit_region(
+        &mut self,
+        min: IVec3,
+        max: IVec3,
+        edit: impl FnMut(IVec3) -> BlockEdit,
+    ) -> Result<()> {
+        self.world.edit_region(min, max, edit)
+    }
+
+    /// The cubes rebuilt per frame for [`edit_region`](Self::edit_region),
+    /// [`DEFAULT_REBUILD_BUDGET`](crate::DEFAULT_REBUILD_BUDGET) to begin
+    /// with. Counted in cubes, not time, so the same edits always take the
+    /// same frames. One chunk a frame goes through even past it, so a budget
+    /// of 0 still gets there.
+    pub fn set_rebuild_budget(&mut self, cubes: u32) {
+        self.rebuild_budget = cubes;
+    }
+
+    /// The chunks whose new version is not on screen yet.
+    pub fn pending_rebuilds(&self) -> usize {
+        self.world.dirty().count()
+    }
+
     /// How many static cubes the scene holds, before culling.
     pub fn static_count(&self) -> u32 {
         u32::try_from(self.world.cube_count()).expect("a static capacity under u32::MAX")
@@ -234,6 +307,8 @@ impl Scene {
             self.dynamic_uploaded = dynamic_slots(instances.len());
         }
 
+        self.rebuild_chunks(device, camera.eye);
+
         if let Some(statics) = &self.statics {
             statics.reset(device);
             statics.cull(
@@ -269,6 +344,37 @@ impl Scene {
     }
 }
 
+impl Scene {
+    /// Writes to the GPU the changed chunks this frame has room and budget
+    /// for. Nothing at all happens in a frame with no edits waiting.
+    fn rebuild_chunks(&mut self, device: &Device, eye: Vec3) {
+        let Some(statics) = &mut self.statics else {
+            return;
+        };
+        if self.world.dirty().next().is_none() {
+            return;
+        }
+        let candidates: Vec<Candidate> = self
+            .world
+            .dirty()
+            .map(|(key, priority)| {
+                let centre = (IVec3::from_array(key).as_vec3() + 0.5) * CHUNK_SIZE;
+                Candidate {
+                    key,
+                    priority,
+                    distance: centre.distance(eye),
+                    old_len: statics.gpu_len(key),
+                    new_len: self.world.chunk_len(key),
+                }
+            })
+            .collect();
+        for key in plan_rebuilds(&candidates, statics.free_slots(), self.rebuild_budget) {
+            statics.rebuild(device, &self.world, key);
+            self.world.clean(key);
+        }
+    }
+}
+
 /// A number of dynamic cubes as the `u32` instance count a draw takes. Every
 /// count it is given is at most the capacity, which went through it first.
 ///
@@ -281,12 +387,15 @@ fn dynamic_slots(cubes: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use etib_core::test_util::device;
     use etib_core::wgpu;
-    use glam::Vec3;
+    use glam::{IVec3, Vec3};
 
     use super::*;
     use crate::camera::Projection;
+    use crate::world::BlockEdit;
 
     fn white_cube(x: f32, y: f32, z: f32) -> ModelCube {
         ModelCube {
@@ -503,6 +612,255 @@ mod tests {
             panic!("static capacity")
         };
         Scene::new(&device, &[white_cube(0.0, 0.0, 0.0)], 0, 1, 64, 64);
+    }
+
+    fn render_once(device: &Device, scene: &mut Scene) {
+        let mut encoder = device.encoder("test");
+        scene.render(device, &mut encoder, &mut camera());
+        finish(device, encoder);
+    }
+
+    fn colour(i: i32) -> Vec3 {
+        Vec3::new(
+            (i % 7) as f32 / 7.0,
+            (i % 5) as f32 / 5.0,
+            (i % 3) as f32 / 3.0,
+        )
+    }
+
+    fn block_cubes(blocks: &BTreeMap<[i32; 3], Vec3>) -> Vec<ModelCube> {
+        blocks
+            .iter()
+            .map(|(cell, color)| ModelCube {
+                position: IVec3::from_array(*cell).as_vec3(),
+                color: *color,
+            })
+            .collect()
+    }
+
+    /// The GPU holds what a scene built from `cubes` would.
+    fn same_as_fresh(device: &Device, scene: &Scene, cubes: &[ModelCube]) {
+        let mut fresh = Scene::new(device, cubes, cubes.len().max(1), 1, 64, 64);
+        render_once(device, &mut fresh);
+        let bytes = |s: &Scene| -> Vec<u8> {
+            bytemuck::cast_slice(&s.statics.as_ref().unwrap().live_instances(device)).to_vec()
+        };
+        assert_eq!(bytes(scene), bytes(&fresh));
+    }
+
+    fn visible_count(device: &Device, scene: &Scene) -> u32 {
+        scene.statics.as_ref().unwrap().draw.read_back(device)[0].instance_count
+    }
+
+    #[test]
+    fn a_block_is_on_the_gpu_at_the_next_frame() {
+        let Some(device) = device() else { return };
+        let mut scene = Scene::new(&device, &[white_cube(0.0, 0.0, 0.0)], 4, 1, 64, 64);
+        render_once(&device, &mut scene);
+        scene.set_block(IVec3::new(1, 0, 0), colour(1)).unwrap();
+        render_once(&device, &mut scene);
+        assert_eq!(scene.pending_rebuilds(), 0);
+        same_as_fresh(
+            &device,
+            &scene,
+            &[
+                white_cube(0.0, 0.0, 0.0),
+                ModelCube {
+                    position: Vec3::X,
+                    color: colour(1),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_chunk_matches_a_fresh_scene_after_many_edits() {
+        let Some(device) = device() else { return };
+        let mut scene = Scene::new(&device, &[], 32, 1, 64, 64);
+        let mut blocks = BTreeMap::new();
+        for i in 0..20 {
+            // Three chunks along X.
+            let cell = IVec3::new(i * 5 - 20, i % 3, -(i % 4));
+            scene.set_block(cell, colour(i)).unwrap();
+            blocks.insert(cell.to_array(), colour(i));
+        }
+        render_once(&device, &mut scene);
+        for i in (0..20).step_by(3) {
+            let cell = IVec3::new(i * 5 - 20, i % 3, -(i % 4));
+            scene.set_block(cell, colour(i + 1)).unwrap();
+            blocks.insert(cell.to_array(), colour(i + 1));
+        }
+        for i in (1..20).step_by(4) {
+            let cell = IVec3::new(i * 5 - 20, i % 3, -(i % 4));
+            scene.remove_block(cell);
+            blocks.remove(&cell.to_array());
+        }
+        render_once(&device, &mut scene);
+        assert_eq!(scene.static_count() as usize, blocks.len());
+        same_as_fresh(&device, &scene, &block_cubes(&blocks));
+    }
+
+    #[test]
+    fn a_waiting_chunk_keeps_its_old_contents() {
+        let Some(device) = device() else { return };
+        let mut scene = Scene::new(
+            &device,
+            &[white_cube(0.0, 0.0, 0.0), white_cube(40.0, 0.0, 0.0)],
+            8,
+            1,
+            64,
+            64,
+        );
+        scene.set_rebuild_budget(1);
+        render_once(&device, &mut scene);
+        let before = scene.statics.as_ref().unwrap().live_instances(&device);
+        scene
+            .edit_region(IVec3::ZERO, IVec3::new(40, 0, 0), |_| BlockEdit::Remove)
+            .unwrap();
+        assert_eq!(scene.block(IVec3::ZERO), None);
+        assert_eq!(scene.static_count(), 0);
+        assert_eq!(
+            scene.statics.as_ref().unwrap().live_instances(&device),
+            before
+        );
+        assert_eq!(scene.pending_rebuilds(), 2);
+        render_once(&device, &mut scene);
+        assert_eq!(scene.pending_rebuilds(), 1);
+        render_once(&device, &mut scene);
+        assert_eq!(scene.pending_rebuilds(), 0);
+    }
+
+    #[test]
+    fn past_capacity_a_scene_reports_it_and_changes_nothing() {
+        let Some(device) = device() else { return };
+        let mut scene = Scene::new(&device, &[white_cube(0.0, 0.0, 0.0)], 1, 1, 64, 64);
+        let err = scene.set_block(IVec3::X, Vec3::ONE).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::Error::Capacity {
+                    needed: 2,
+                    capacity: 1
+                }
+            ),
+            "{err:?}"
+        );
+        let err = scene
+            .edit_region(IVec3::X, IVec3::new(3, 0, 0), |_| BlockEdit::Set(Vec3::ONE))
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::Capacity { .. }), "{err:?}");
+        assert_eq!(scene.static_count(), 1);
+        assert_eq!(scene.pending_rebuilds(), 0);
+    }
+
+    #[test]
+    fn a_capacity_of_zero_refuses_blocks() {
+        let Some(device) = device() else { return };
+        let mut scene = Scene::new(&device, &[], 0, 1, 64, 64);
+        assert!(scene.set_block(IVec3::ZERO, Vec3::ONE).is_err());
+        render_once(&device, &mut scene);
+    }
+
+    #[test]
+    fn filling_emptying_and_refilling_in_another_order_never_fails() {
+        let Some(device) = device() else { return };
+        let mut scene = Scene::new(&device, &[], 64, 1, 64, 64);
+        // 64 blocks, 16 in each of four chunks along X.
+        let cells: Vec<IVec3> = (0..64)
+            .map(|i| IVec3::new((i / 16) * 32 + i % 16, 0, 0))
+            .collect();
+        let mut blocks = BTreeMap::new();
+        for (i, cell) in (0..).zip(&cells) {
+            scene.set_block(*cell, colour(i)).unwrap();
+            blocks.insert(cell.to_array(), colour(i));
+        }
+        render_once(&device, &mut scene);
+        for round in 0..3i32 {
+            for cell in cells.iter().skip(usize::from(round % 2 == 1)).step_by(2) {
+                scene.remove_block(*cell);
+                blocks.remove(&cell.to_array());
+            }
+            render_once(&device, &mut scene);
+            for (i, cell) in (0..64).zip(&cells).rev() {
+                if scene.block(*cell).is_none() {
+                    scene.set_block(*cell, colour(i + round)).unwrap();
+                    blocks.insert(cell.to_array(), colour(i + round));
+                }
+            }
+            render_once(&device, &mut scene);
+        }
+        assert_eq!(scene.static_count(), 64);
+        same_as_fresh(&device, &scene, &block_cubes(&blocks));
+    }
+
+    #[test]
+    fn a_full_scene_can_swap_a_far_zone_for_a_near_one_and_take_a_block() {
+        let Some(device) = device() else { return };
+        let far: Vec<_> = (0..8)
+            .map(|i| white_cube(500.0 + i as f32, 0.0, 0.0))
+            .collect();
+        let mut scene = Scene::new(&device, &far, 8, 1, 64, 64);
+        scene.set_rebuild_budget(1);
+        render_once(&device, &mut scene);
+
+        scene
+            .edit_region(IVec3::new(500, 0, 0), IVec3::new(507, 0, 0), |_| {
+                BlockEdit::Remove
+            })
+            .unwrap();
+        scene
+            .edit_region(IVec3::ZERO, IVec3::new(6, 0, 0), |_| {
+                BlockEdit::Set(Vec3::ONE)
+            })
+            .unwrap();
+        scene.set_block(IVec3::new(7, 0, 0), Vec3::ONE).unwrap();
+        render_once(&device, &mut scene);
+
+        let near: Vec<_> = (0..8).map(|i| white_cube(i as f32, 0.0, 0.0)).collect();
+        same_as_fresh(&device, &scene, &near);
+    }
+
+    #[test]
+    fn a_scene_emptied_and_refilled_matches_a_fresh_one() {
+        let Some(device) = device() else { return };
+        let cubes = [white_cube(0.0, 0.0, 0.0), white_cube(1.0, 0.0, 0.0)];
+        let mut scene = Scene::new(&device, &cubes, 4, 1, 64, 64);
+        render_once(&device, &mut scene);
+        scene
+            .edit_region(IVec3::ZERO, IVec3::X, |_| BlockEdit::Remove)
+            .unwrap();
+        render_once(&device, &mut scene);
+        assert_eq!(visible_count(&device, &scene), 0);
+
+        scene.set_block(IVec3::new(0, 1, 0), colour(2)).unwrap();
+        scene.set_block(IVec3::new(2, 0, -1), colour(3)).unwrap();
+        render_once(&device, &mut scene);
+        same_as_fresh(
+            &device,
+            &scene,
+            &[
+                ModelCube {
+                    position: Vec3::Y,
+                    color: colour(2),
+                },
+                ModelCube {
+                    position: Vec3::new(2.0, 0.0, -1.0),
+                    color: colour(3),
+                },
+            ],
+        );
+        assert_eq!(visible_count(&device, &scene), 2);
+    }
+
+    #[test]
+    fn a_scene_built_empty_can_receive_blocks() {
+        let Some(device) = device() else { return };
+        let mut scene = Scene::new(&device, &[], 4, 1, 64, 64);
+        render_once(&device, &mut scene);
+        scene.set_block(IVec3::ZERO, Vec3::ONE).unwrap();
+        render_once(&device, &mut scene);
+        assert_eq!(visible_count(&device, &scene), 1);
+        same_as_fresh(&device, &scene, &[white_cube(0.0, 0.0, 0.0)]);
     }
 
     #[test]

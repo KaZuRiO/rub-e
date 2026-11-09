@@ -105,7 +105,7 @@ pub(crate) fn plan_rebuilds(candidates: &[Candidate], free: u32, budget: u32) ->
         budget_used = true;
         plan.push(chunk.key);
         if chunk.shrinks() {
-            retry.extend(aside.drain(..));
+            retry.append(&mut aside);
         }
     }
     plan
