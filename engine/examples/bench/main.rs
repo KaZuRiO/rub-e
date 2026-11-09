@@ -10,7 +10,8 @@
 //! ```
 //!
 //! `--scenario` picks what `--save` plays: `terrain` (the default), `scattered`,
-//! `moving` or `few-changes`. Each run goes under its own name, so one per
+//! `moving`, `few-changes`, `edit-blocks` (four blocks toggled a frame) or
+//! `edit-area` (a ball of terrain blown away and put back). Each run goes under its own name, so one per
 //! scenario is `--save before-moving --scenario moving`; comparing two
 //! scenarios warns that the numbers are not comparable.
 //!
@@ -32,15 +33,15 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use etib::{App, Frame, Gpu, Grade, Hdr, Output, PostProcess, Vsync};
-use etib_scene::glam::{Mat4, Vec3};
-use etib_scene::{Camera, DynamicId, DynamicModel, ModelCube, Projection, Scene};
+use etib_scene::glam::{IVec3, Mat4, Vec3};
+use etib_scene::{BlockEdit, Camera, DynamicId, DynamicModel, ModelCube, Projection, Scene};
 use log::{error, info, warn};
 
 use collect::Collector;
 use results::{RunResults, ScenarioInfo};
 use scenario::{
-    FAR_DISTANCE, MEASURED_FRAMES, SCENARIO_VERSION, Scenario, WARMUP_FRAMES, WINDOW,
-    model_position,
+    AREA_RADIUS, AreaEdit, FAR_DISTANCE, MEASURED_FRAMES, SCENARIO_VERSION, Scenario,
+    WARMUP_FRAMES, WINDOW, area_edit, edit_blocks, model_position, terrain_block,
 };
 
 const SKY: &[u8] = include_bytes!("../../assets/sky.hdr");
@@ -168,6 +169,10 @@ struct BenchApp {
     dynamic_cubes: u32,
     /// Frames rendered so far, which picks the camera pose.
     bench_frame: u32,
+    /// Measured frames in a row, up to this one, that ended with an edit still
+    /// off screen, and the longest such run.
+    rebuild_streak: u32,
+    rebuild_frames: u32,
     /// When the previous frame was rendered. The bench times frames itself:
     /// `App::update`'s step is capped at `MAX_DT`, which would hide stalls.
     last_render: Option<Instant>,
@@ -190,7 +195,7 @@ impl BenchApp {
         let mut scene = Scene::new(
             &gpu.device,
             cubes,
-            cubes.len(),
+            scenario.static_capacity(cubes.len()),
             dynamic_cubes,
             width,
             height,
@@ -233,6 +238,8 @@ impl BenchApp {
             generated_cubes,
             dynamic_cubes: u32::try_from(dynamic_cubes).context("too many dynamic cubes")?,
             bench_frame: 0,
+            rebuild_streak: 0,
+            rebuild_frames: 0,
             last_render: None,
             outcome,
         })
@@ -266,6 +273,7 @@ impl BenchApp {
                 generated_cubes: self.generated_cubes,
                 kept_cubes: self.scene.static_count(),
                 dynamic_cubes: self.dynamic_cubes,
+                rebuild_frames: self.rebuild_frames,
             },
             gpu_timing: gpu.device.gpu_timing_available(),
             cpu_frame: measured.cpu_frame,
@@ -282,6 +290,57 @@ impl BenchApp {
                 error!("{err:#}");
                 Outcome::Failed
             }
+        }
+    }
+
+    /// The edits of the scenario's frame, before it is rendered.
+    fn apply_edits(&mut self) {
+        match self.scenario {
+            Scenario::EditBlocks => {
+                for (cell, color) in edit_blocks(self.bench_frame) {
+                    if self.scene.block(cell).is_some() {
+                        self.scene.remove_block(cell);
+                    } else {
+                        self.scene
+                            .set_block(cell, color)
+                            .expect("the capacity covers the scenario");
+                    }
+                }
+            }
+            Scenario::EditArea => {
+                let Some((edit, centre)) = area_edit(self.bench_frame) else {
+                    return;
+                };
+                let radius = IVec3::splat(AREA_RADIUS);
+                self.scene
+                    .edit_region(centre - radius, centre + radius, |cell| {
+                        if (cell - centre).length_squared() > AREA_RADIUS * AREA_RADIUS {
+                            return BlockEdit::Keep;
+                        }
+                        match edit {
+                            AreaEdit::Remove => BlockEdit::Remove,
+                            AreaEdit::Restore => {
+                                terrain_block(cell).map_or(BlockEdit::Keep, BlockEdit::Set)
+                            }
+                        }
+                    })
+                    .expect("the capacity covers the scenario");
+            }
+            Scenario::Terrain | Scenario::Scattered | Scenario::Moving | Scenario::FewChanges => {}
+        }
+    }
+
+    /// Counts the measured frames that end with an edit still off screen.
+    fn count_rebuild_frames(&mut self) {
+        let measured = WARMUP_FRAMES..WARMUP_FRAMES + MEASURED_FRAMES;
+        if !measured.contains(&self.bench_frame) {
+            return;
+        }
+        if self.scene.pending_rebuilds() > 0 {
+            self.rebuild_streak += 1;
+            self.rebuild_frames = self.rebuild_frames.max(self.rebuild_streak);
+        } else {
+            self.rebuild_streak = 0;
         }
     }
 }
@@ -320,7 +379,9 @@ impl App for BenchApp {
                 model.position = model_position(index, self.bench_frame);
             }
         }
+        self.apply_edits();
         self.scene.render(&gpu.device, encoder, &mut self.camera);
+        self.count_rebuild_frames();
         self.post
             .draw(&gpu.device, encoder, view, &self.grade, self.output);
 
@@ -362,6 +423,9 @@ mod tests {
         let args =
             Args::try_parse_from(["bench", "--save", "base", "--scenario", "few-changes"]).unwrap();
         assert_eq!(args.scenario, Scenario::FewChanges);
+        let args =
+            Args::try_parse_from(["bench", "--save", "base", "--scenario", "edit-area"]).unwrap();
+        assert_eq!(args.scenario, Scenario::EditArea);
     }
 
     #[test]

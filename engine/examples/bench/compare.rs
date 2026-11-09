@@ -25,13 +25,14 @@ fn commit_label(run: &RunResults) -> String {
 
 fn header_line(run: &RunResults) -> String {
     format!(
-        "{} ({}, {}: {} cubes generated, {} kept, {} dynamic)",
+        "{} ({}, {}: {} cubes generated, {} kept, {} dynamic, {} rebuild frames)",
         run.name,
         commit_label(run),
         run.scenario.name,
         run.scenario.generated_cubes,
         run.scenario.kept_cubes,
-        run.scenario.dynamic_cubes
+        run.scenario.dynamic_cubes,
+        run.scenario.rebuild_frames
     )
 }
 
@@ -337,6 +338,13 @@ mod tests {
                 .contains(DASH),
             "{out}"
         );
+    }
+
+    #[test]
+    fn compare_shows_how_long_the_rebuilds_took() {
+        let mut a = run("a", 4.0);
+        a.scenario.rebuild_frames = 7;
+        assert!(compare(&a, &a).contains("7 rebuild frames"));
     }
 
     #[test]
