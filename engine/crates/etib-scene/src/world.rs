@@ -7,9 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use glam::{IVec3, Mat4, Vec3};
+use glam::{IVec3, Vec3};
 
-use crate::cube::{CubeRaw, pack_srgb8, unpack_srgb8};
+use crate::cube::{StaticCubeRaw, pack_srgb8, unpack_srgb8};
 use crate::culling::{CHUNK_SIZE, ChunkKey, chunk_of};
 use crate::error::{Error, Result};
 use crate::model::ModelCube;
@@ -219,9 +219,29 @@ fn chunk_of_cell(cell: IVec3) -> ChunkKey {
     cell.div_euclid(IVec3::splat(side)).to_array()
 }
 
-/// Whether a position is the centre of a cell.
-fn on_grid(position: Vec3) -> bool {
-    position == position.round()
+/// How far from an integer a coordinate may be and still count as on it.
+const GRID_TOLERANCE: f32 = 1e-4;
+
+/// Past this, in either direction, an f32 no longer holds every integer, so
+/// there is no grid to sit on.
+const GRID_LIMIT: f32 = 16_777_216.0; // 2^24
+
+/// The cell `p` is the centre of, if every coordinate is finite, within
+/// [`GRID_LIMIT`], and within [`GRID_TOLERANCE`] of an integer. A NaN or
+/// infinite coordinate is never on the grid, so such a cube neither occupies
+/// a cell nor buries another.
+fn grid_position(p: Vec3) -> Option<IVec3> {
+    if !p.is_finite() || p.abs().max_element() >= GRID_LIMIT {
+        return None;
+    }
+    let rounded = p.round();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "rounded already, and within 2^24, so it fits an i32"
+    )]
+    let on_grid = ((p - rounded).abs().max_element() <= GRID_TOLERANCE)
+        .then(|| IVec3::new(rounded.x as i32, rounded.y as i32, rounded.z as i32));
+    on_grid
 }
 
 /// The cell a position rounds to.
@@ -287,8 +307,7 @@ impl World {
             count: 0,
         };
         for cube in cubes {
-            if on_grid(cube.position) {
-                let cell = cube.position.as_ivec3();
+            if let Some(cell) = grid_position(cube.position) {
                 world.put(cell, pack_srgb8(cube.color));
             } else {
                 world
@@ -314,7 +333,9 @@ impl World {
     }
 
     /// Puts or replaces the block of `cell`; the chunk is rebuilt at once. A
-    /// colour that encodes like the one in place changes nothing.
+    /// colour that encodes like the one in place changes nothing. Cells past
+    /// ±2^24 on any axis, where an f32 no longer holds every integer, are not
+    /// supported.
     pub fn set_block(&mut self, cell: IVec3, color: Vec3) -> Result<()> {
         let packed = pack_srgb8(color);
         match self.packed(cell) {
@@ -489,31 +510,28 @@ impl World {
     /// counting as empty; off-grid cubes are always drawn and bury nothing.
     /// Empty for a chunk that no longer holds anything. The same cubes always
     /// give the same instances.
-    pub fn instances(&self, key: ChunkKey) -> Vec<CubeRaw> {
+    pub fn instances(&self, key: ChunkKey) -> Vec<StaticCubeRaw> {
         let Some(exposure) = Exposure::new(&self.chunks, key) else {
             return Vec::new();
         };
         let chunk = exposure.chunk;
-        let block = |position: Vec3, color: Vec3| {
-            CubeRaw::new(Mat4::from_translation(position), color.extend(1.0))
-        };
         let mut instances = Vec::new();
         for row in 0..ROWS {
             let mut bits = exposure.row(row);
             while bits != 0 {
                 let index = row * 32 + bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                instances.push(block(
-                    cell_at(key, index).as_vec3(),
-                    unpack_srgb8(chunk.colors[index]),
-                ));
+                instances.push(StaticCubeRaw {
+                    position: cell_at(key, index).as_vec3().to_array(),
+                    color: chunk.colors[index],
+                });
             }
         }
         instances.extend(
             chunk
                 .off_grid
                 .iter()
-                .map(|cube| block(cube.position, cube.color)),
+                .map(|cube| StaticCubeRaw::new(cube.position, cube.color)),
         );
         instances
     }
@@ -618,7 +636,6 @@ mod tests {
     use glam::{IVec3, Vec3};
 
     use super::*;
-    use crate::cube::CubeRaw;
     use crate::error::Error;
     use crate::model::ModelCube;
 
@@ -768,7 +785,7 @@ mod tests {
         .unwrap();
         assert_eq!(w.cube_count(), 1);
         let kept = w.instances([0, 0, 0]);
-        assert_eq!(kept[0].model[3][0], 3.25);
+        assert_eq!(kept[0].position[0], 3.25);
     }
 
     #[test]
@@ -797,7 +814,7 @@ mod tests {
             for &c in order {
                 w.set_block(c, RED).unwrap();
             }
-            bytemuck::cast_slice::<CubeRaw, u8>(&w.instances([0, 0, 0])).to_vec()
+            bytemuck::cast_slice::<StaticCubeRaw, u8>(&w.instances([0, 0, 0])).to_vec()
         };
         assert_eq!(build(&cells), build(&[cells[2], cells[0], cells[1]]));
     }
@@ -858,8 +875,8 @@ mod tests {
     }
 
     /// Where an instance is drawn.
-    fn position(cube: &CubeRaw) -> Vec3 {
-        Vec3::from_slice(&cube.model[3][..3])
+    fn position(cube: &StaticCubeRaw) -> Vec3 {
+        Vec3::from(cube.position)
     }
 
     /// Every instance sent, across all chunks, by position.
@@ -951,8 +968,62 @@ mod tests {
     fn colours_are_kept() {
         let world = from_cubes(&[cube_at(Vec3::ZERO)]);
         let raw = world.instances([0, 0, 0])[0];
-        let drawn = unpack_srgb8(pack_srgb8(Vec3::new(0.5, 0.25, 1.0)));
-        assert_eq!(raw.color, drawn.extend(1.0).to_array());
+        assert_eq!(raw.color, pack_srgb8(Vec3::new(0.5, 0.25, 1.0)));
+    }
+
+    #[test]
+    fn only_finite_coordinates_within_float_precision_are_on_the_grid() {
+        assert_eq!(
+            grid_position(Vec3::new(1.0, -2.0, 3.0)),
+            Some(IVec3::new(1, -2, 3))
+        );
+        for p in [
+            Vec3::new(f32::NAN, 5.0, 5.0),
+            Vec3::new(5.0, f32::NAN, 5.0),
+            Vec3::new(5.0, 5.0, f32::NAN),
+            Vec3::new(f32::INFINITY, 5.0, 5.0),
+            Vec3::new(5.0, f32::NEG_INFINITY, 5.0),
+            // Past 2^24 an f32 no longer holds every integer.
+            Vec3::new(1.0e10, 5.0, 5.0),
+            Vec3::new(5.0, 5.0, -3.0e7),
+        ] {
+            assert_eq!(grid_position(p), None, "{p}");
+        }
+    }
+
+    #[test]
+    fn a_cube_with_a_bad_coordinate_neither_occupies_nor_buries() {
+        // The NaN cube would land on (0, 1, 1) if it were put on the grid,
+        // and the 1e10 one next to i32::MAX, where looking at its neighbour
+        // would overflow.
+        let mut cubes = block(IVec3::ZERO, 3);
+        cubes.retain(|c| c.position != Vec3::new(0.0, 1.0, 1.0));
+        cubes.push(cube_at(Vec3::new(f32::NAN, 1.0, 1.0)));
+        cubes.push(cube_at(Vec3::new(1.0e10, 0.0, 0.0)));
+        let world = from_cubes(&cubes);
+        assert_eq!(world.block(IVec3::new(0, 1, 1)), None);
+        // The 26 placed cubes, now all exposed through the hole, plus the two
+        // off the grid.
+        assert_eq!(exposed_positions(&world).len(), 26 + 2);
+    }
+
+    #[test]
+    fn float_noise_snaps_to_the_grid() {
+        let noisy: Vec<_> = block(IVec3::ZERO, 3)
+            .into_iter()
+            .map(|c| cube_at(c.position + Vec3::splat(0.000_01)))
+            .collect();
+        let world = from_cubes(&noisy);
+        assert_eq!(exposed_set(&world).len(), 26);
+        assert!(world.block(IVec3::ONE).is_some());
+    }
+
+    #[test]
+    fn a_cube_just_short_of_a_chunk_edge_snaps_into_the_next_chunk() {
+        // 31.99999 is 32 on the grid, which is chunk 1, not chunk 0.
+        let world = from_cubes(&[cube_at(Vec3::new(31.999_99, 0.0, 0.0))]);
+        assert_eq!(world.chunk_keys().collect::<Vec<_>>(), [[1, 0, 0]]);
+        assert_eq!(exposed_positions(&world), [Vec3::new(32.0, 0.0, 0.0)]);
     }
 
     // Cells 30..=33 on X, 0..=2 on Y and Z: two chunks along X, (32, 1, 1) buried.
@@ -986,7 +1057,7 @@ mod tests {
         assert!(
             w.instances([1, 0, 0])
                 .iter()
-                .any(|c| c.model[3][..3] == [32.0, 1.0, 1.0])
+                .any(|c| c.position == [32.0, 1.0, 1.0])
         );
     }
 

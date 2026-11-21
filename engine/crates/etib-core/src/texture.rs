@@ -297,6 +297,76 @@ impl RenderTexture {
         self.format
     }
 
+    /// Copies the texels back to the CPU, row after row with no padding,
+    /// waiting for the GPU to finish everything submitted so far. For tests
+    /// only: it stalls the device.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn read_back(&self, device: &Device) -> Vec<u8> {
+        let (width, height) = self.target.size;
+        let texel = self
+            .format
+            .raw()
+            .block_copy_size(None)
+            .expect("a render texture format has a texel size");
+        let row = width * texel;
+        let padded = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let staging = device.raw().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("etib texture read-back"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device
+            .raw()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("etib texture read-back"),
+            });
+        encoder.copy_texture_to_buffer(
+            self.target._texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        device.raw_queue().submit([encoder.finish()]);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            // The receiver outlives the poll below, so the send cannot fail.
+            let _ = sender.send(result);
+        });
+        device
+            .raw()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device lost while reading a texture back");
+        match receiver.try_recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("mapping a texture read-back failed: {error}"),
+            Err(_) => panic!("a texture read-back was not mapped after waiting for the GPU"),
+        }
+        let mapped = slice
+            .get_mapped_range()
+            .expect("reading a mapped texture read-back");
+        let bytes = mapped
+            .chunks(padded as usize)
+            .flat_map(|line| &line[..row as usize])
+            .copied()
+            .collect();
+        drop(mapped);
+        staging.unmap();
+        bytes
+    }
+
     /// The size in texels.
     pub fn size(&self) -> (u32, u32) {
         self.target.size
@@ -337,7 +407,10 @@ fn create_render_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: format.raw(),
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        // COPY_SRC so tests can read what was drawn back.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = TextureView::from_raw(texture.create_view(&wgpu::TextureViewDescriptor::default()));
@@ -775,6 +848,27 @@ mod tests {
 mod gpu_tests {
     use super::*;
     use crate::test_util;
+
+    #[test]
+    fn render_textures_read_back_what_was_drawn() {
+        let Some(device) = test_util::device() else {
+            return;
+        };
+        // 3 texels of 4 bytes a row: a row that is not 256-byte aligned.
+        let target = RenderTexture::new(&device, "test", 3, 2, TextureFormat::RGBA8_SRGB);
+        let mut encoder = device.encoder("test");
+        drop(encoder.render_pass(
+            "clear",
+            target.view(),
+            crate::Load::Clear(crate::Color {
+                r: 1.0,
+                a: 1.0,
+                ..crate::Color::BLACK
+            }),
+        ));
+        device.submit(encoder);
+        assert_eq!(target.read_back(&device), [255, 0, 0, 255].repeat(6));
+    }
 
     #[test]
     fn depth_resizes_only_when_it_has_to() {

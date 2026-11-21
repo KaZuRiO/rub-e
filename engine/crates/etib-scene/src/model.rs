@@ -21,7 +21,8 @@ use crate::error::{Error, Result};
 pub struct ModelCube {
     /// The cube's centre, in model units: one per cube side.
     pub position: Vec3,
-    /// Linear RGB, 0..1 per channel.
+    /// Linear RGB, 0..1 per channel. A static cube's colour is clamped to
+    /// that range and kept to 8 bits per channel, sRGB-encoded.
     pub color: Vec3,
 }
 

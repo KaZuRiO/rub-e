@@ -40,7 +40,10 @@ const BACKGROUND: Color = Color::BLACK;
 /// touched are sent again. Dynamic models are added, moved and removed at runtime; they are few, so
 /// they are drawn without culling.
 pub struct Scene {
+    /// Dynamic cubes, from an instance buffer of [`CubeRaw`]s.
     pipeline: RenderPipeline,
+    /// Static cubes, from storage through the list culling leaves.
+    static_pipeline: RenderPipeline,
     camera_layout: BindLayout,
     camera: UniformBuffer<CameraRaw>,
     camera_group: BindGroup,
@@ -75,7 +78,8 @@ impl Scene {
     /// models, drawing at `width` x `height`.
     ///
     /// The GPU memory of the static cubes follows `static_capacity`, at about
-    /// 220 bytes a cube.
+    /// 76 bytes a cube: 24 for the instance, its chunk id and its place in the
+    /// visible list, and 52 for the chunk row a lone cube could need.
     ///
     /// # Panics
     ///
@@ -94,7 +98,14 @@ impl Scene {
         let camera = UniformBuffer::new(device, "camera");
         let camera_group = camera_layout.group(device, "camera", &[&camera]);
 
-        let shader = Shader::wgsl(device, "cubes", include_str!("shaders/cube.wgsl"));
+        let shader = Shader::wgsl(
+            device,
+            "cubes",
+            concat!(
+                include_str!("shaders/cube.wgsl"),
+                include_str!("shaders/shading.wgsl")
+            ),
+        );
         let pipeline = RenderPipeline::raster(
             device,
             &RasterDesc {
@@ -117,6 +128,28 @@ impl Scene {
         );
         let world = World::new(static_cubes, static_capacity);
         let culling = CullingPasses::new(device, &camera_layout);
+        let static_shader = Shader::wgsl(
+            device,
+            "static cubes",
+            concat!(
+                include_str!("shaders/static_cube.wgsl"),
+                include_str!("shaders/shading.wgsl")
+            ),
+        );
+        let static_pipeline = RenderPipeline::raster(
+            device,
+            &RasterDesc {
+                label: "static cubes",
+                shader: &static_shader,
+                entry_points: ("vs_main", "fs_main"),
+                layouts: &[&camera_layout, &culling.draw_layout],
+                vertex: &[Vertex::LAYOUT],
+                target: Self::TARGET.format(),
+                depth: Some(Depth::default()),
+                blend: Blend::Replace,
+                cull: Cull::Back,
+            },
+        );
         let statics = StaticCubes::new(device, &culling, &world);
 
         let dynamic_capacity = dynamic_capacity.max(1);
@@ -125,6 +158,7 @@ impl Scene {
 
         Self {
             pipeline,
+            static_pipeline,
             camera_layout,
             camera,
             camera_group,
@@ -269,9 +303,17 @@ impl Scene {
         self.world.dirty().count()
     }
 
-    /// How many static cubes the scene holds, before culling.
+    /// How many static cubes the scene holds, before culling, buried ones
+    /// included.
     pub fn static_count(&self) -> u32 {
         u32::try_from(self.world.cube_count()).expect("a static capacity under u32::MAX")
+    }
+
+    /// How many static cubes are on the GPU: those with at least one face
+    /// free, before frustum culling. A chunk whose rebuild is still waiting
+    /// counts as the screen shows it.
+    pub fn static_exposed_count(&self) -> u32 {
+        self.statics.as_ref().map_or(0, StaticCubes::sent_count)
     }
 
     /// Cubes across all the live dynamic models.
@@ -331,16 +373,17 @@ impl Scene {
             &self.depth,
             DepthLoad::Clear(1.0),
         );
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.camera_group);
         pass.set_vertex_buffer(0, &self.vertices);
         pass.set_index_buffer(&self.indices);
 
         if let Some(statics) = &self.statics {
-            pass.set_vertex_buffer(1, &statics.visible);
+            pass.set_pipeline(&self.static_pipeline);
+            pass.set_bind_group(1, &statics.draw_group);
             pass.draw_indexed_indirect(&statics.draw, 0);
         }
         if self.dynamic_uploaded > 0 {
+            pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(1, &self.dynamic_buffer);
             pass.draw_indexed(0..self.indices.len(), 0, 0..self.dynamic_uploaded);
         }
@@ -523,10 +566,9 @@ mod tests {
         statics.draw.read_back(device)[0].instance_count
     }
 
-    #[test]
-    fn culling_keeps_only_cubes_in_view() {
-        let Some(device) = device() else { return };
-        let cubes = [
+    /// Cubes around what `camera()` sees: the first three are in view.
+    fn view_test_cubes() -> [ModelCube; 7] {
+        [
             white_cube(0.0, 0.0, 0.0),     // in view
             white_cube(1.0, 0.0, 0.0),     // in view
             white_cube(0.0, 1.0, -3.0),    // in view
@@ -534,8 +576,171 @@ mod tests {
             white_cube(0.0, 5.0, 40.0),    // behind the eye
             white_cube(-500.0, 0.0, 0.0),  // far to the left, in its own chunk
             white_cube(0.0, 0.0, -2000.0), // past the far plane
-        ];
+        ]
+    }
+
+    #[test]
+    fn culling_keeps_only_cubes_in_view() {
+        let Some(device) = device() else { return };
+        let cubes = view_test_cubes();
         assert_eq!(cubes_kept(&device, &cubes, &mut camera()), 3);
+    }
+
+    /// What culling lists is the index of each visible cube in the static
+    /// instances, each one once.
+    #[test]
+    fn visible_cubes_are_listed_by_index() {
+        let Some(device) = device() else { return };
+        let cubes = view_test_cubes();
+        let mut scene = Scene::new(&device, &cubes, cubes.len(), 1, 64, 64);
+        let mut encoder = device.encoder("test");
+        scene.render(&device, &mut encoder, &mut camera());
+        finish(&device, encoder);
+
+        let statics = scene.statics.as_ref().expect("the scene has static cubes");
+        let count = statics.draw.read_back(&device)[0].instance_count as usize;
+        let mut listed = statics.visible.read_back(&device)[..count].to_vec();
+        listed.sort_unstable();
+
+        // At load the chunks are packed in key order, so the instances are
+        // the world's, chunk after chunk.
+        let instances: Vec<_> = scene
+            .world
+            .chunk_keys()
+            .flat_map(|key| scene.world.instances(key))
+            .collect();
+        let in_view = [cubes[0].position, cubes[1].position, cubes[2].position];
+        let mut expected: Vec<u32> = (0u32..)
+            .zip(&instances)
+            .filter(|(_, raw)| in_view.contains(&Vec3::from(raw.position)))
+            .map(|(index, _)| index)
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(listed, expected);
+    }
+
+    /// A half float as an f32.
+    fn from_f16(half: u16) -> f32 {
+        let exponent = i32::from((half >> 10) & 0x1f);
+        let mantissa = f32::from(half & 0x03ff);
+        let magnitude = match exponent {
+            0 => mantissa * 2.0f32.powi(-24),
+            _ => (1.0 + mantissa / 1024.0) * 2.0f32.powi(exponent - 15),
+        };
+        if half & 0x8000 == 0 {
+            magnitude
+        } else {
+            -magnitude
+        }
+    }
+
+    /// The scene's target as linear RGBA, one `[f32; 4]` per pixel.
+    fn pixels(scene: &Scene, device: &Device) -> Vec<[f32; 4]> {
+        scene
+            .target
+            .read_back(device)
+            .chunks_exact(8)
+            .map(|texel| {
+                let channel = |i: usize| from_f16(u16::from_le_bytes([texel[i], texel[i + 1]]));
+                [channel(0), channel(2), channel(4), channel(6)]
+            })
+            .collect()
+    }
+
+    /// The static pipeline draws exactly what the dynamic one, which takes
+    /// a full matrix and a float colour, draws for the same cubes: same
+    /// places, same faces, same colours to within 8-bit sRGB.
+    #[test]
+    fn static_cubes_look_like_the_same_cubes_drawn_dynamically() {
+        let Some(device) = device() else { return };
+        let coloured = |x: f32, y: f32, z: f32, r: f32, g: f32, b: f32| ModelCube {
+            position: Vec3::new(x, y, z),
+            color: Vec3::new(r, g, b),
+        };
+        // Out-of-view cubes first and in other chunks, so a visible cube's
+        // index in the instances is not its place in the visible list.
+        let cubes = vec![
+            coloured(-500.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+            coloured(0.0, 5.0, 40.0, 1.0, 1.0, 1.0),
+            coloured(0.0, 0.0, 0.0, 0.8, 0.2, 0.05),
+            coloured(1.5, 0.0, 0.0, 0.02, 0.6, 0.3),
+            coloured(-1.5, 1.0, -2.0, 0.3, 0.01, 0.9),
+        ];
+        let render = |scene: &mut Scene| {
+            let mut encoder = device.encoder("test");
+            scene.render(&device, &mut encoder, &mut camera());
+            finish(&device, encoder);
+            pixels(scene, &device)
+        };
+
+        let mut statics = Scene::new(&device, &cubes, cubes.len(), 1, 64, 64);
+        let mut dynamics = Scene::new(&device, &[], 0, cubes.len(), 64, 64);
+        dynamics
+            .add_dynamic(DynamicModel::from_cubes(cubes.clone()))
+            .expect("room for the cubes");
+        let (drawn, reference) = (render(&mut statics), render(&mut dynamics));
+
+        let lit = reference.iter().filter(|p| p[..3] != [0.0; 3]).count();
+        assert!(lit > 50, "the reference shows the cubes: {lit} pixels lit");
+        for (i, (got, want)) in drawn.iter().zip(&reference).enumerate() {
+            for c in 0..3 {
+                assert!(
+                    (got[c] - want[c]).abs() <= want[c] * 0.03 + 0.002,
+                    "pixel ({}, {}): {got:?} != {want:?}",
+                    i % 64,
+                    i / 64
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn buried_cubes_are_not_sent() {
+        let Some(device) = device() else { return };
+        // A 3x3x3 block around the origin, all of it in view of camera().
+        let mut cubes = Vec::new();
+        for x in -1..=1 {
+            for y in -1..=1 {
+                for z in -1..=1 {
+                    cubes.push(white_cube(x as f32, y as f32, z as f32));
+                }
+            }
+        }
+        let mut scene = Scene::new(&device, &cubes, cubes.len(), 1, 64, 64);
+        assert_eq!(scene.static_count(), 27);
+        assert_eq!(scene.static_exposed_count(), 26);
+
+        let mut encoder = device.encoder("test");
+        scene.render(&device, &mut encoder, &mut camera());
+        finish(&device, encoder);
+        let statics = scene.statics.as_ref().expect("the scene has static cubes");
+        assert_eq!(statics.draw.read_back(&device)[0].instance_count, 26);
+    }
+
+    /// The exposed count is what the GPU holds: a chunk waiting for its
+    /// rebuild counts as it was until its turn comes.
+    #[test]
+    fn the_exposed_count_follows_the_gpu() {
+        let Some(device) = device() else { return };
+        let mut cubes = Vec::new();
+        for x in -1..=1 {
+            for y in -1..=1 {
+                for z in -1..=1 {
+                    cubes.push(white_cube(x as f32, y as f32, z as f32));
+                }
+            }
+        }
+        let mut scene = Scene::new(&device, &cubes, cubes.len(), 1, 64, 64);
+        // Emptying the top layer uncovers the centre.
+        scene
+            .edit_region(IVec3::new(-1, 1, -1), IVec3::ONE, |_| BlockEdit::Remove)
+            .unwrap();
+        assert_eq!(scene.static_count(), 18);
+        assert_eq!(scene.static_exposed_count(), 26);
+
+        render_once(&device, &mut scene);
+        assert_eq!(scene.pending_rebuilds(), 0);
+        assert_eq!(scene.static_exposed_count(), 18);
     }
 
     #[test]

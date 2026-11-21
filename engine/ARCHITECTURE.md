@@ -641,17 +641,19 @@ through `etib-core`'s own types, and it knows nothing about windows or input.
 ```text
 Scene::render(device, encoder, &mut camera)        crates/etib-scene/src/scene.rs
   │
-  ├─ camera.aspect = the scene's; write CameraRaw    one uniform, Stage::All
+  ├─ camera.aspect = the scene's; write CameraRaw    one uniform, Stage::All,
+  │                                                  with this frame's frustum planes
   ├─ upload the dynamic models, if any changed       packed, group transform applied
   │
   ├─ reset the indirect draw: instance_count = 0     queued, lands first
   ├─ COMPUTE "cull"
   │    chunk pass: one thread per chunk  ──► chunk_visible[]
   │    cube pass:  one thread per cube, skips culled chunks,
-  │                appends survivors to visible[], counts them atomically
+  │                appends survivors' indices to visible[], counts them atomically
   │
   └─ RENDER "scene" into Rgba16Float + depth, cleared
-       static cubes   visible[] as instances, draw_indexed_indirect
+       static cubes   draw_indexed_indirect; instance i is statics[visible[i]],
+                      read from storage by the vertex shader
        dynamic cubes  draw_indexed, no culling — there are few of them
        skybox         one triangle at the far plane, depth LessEqual, no write
 ```
@@ -664,14 +666,30 @@ submission per frame — the scene records into the frame's encoder.
 |---|---|---|
 | `Camera` | the application | Plain maths, no GPU. `advance_frame()` once a frame; it remembers last frame's matrix for `prev_view_proj` |
 | `CameraController` | the application | Told which way to `Move`, how far the mouse went, how far the wheel turned; which keys mean what is the application's call |
-| Static cubes | the `Scene`, editable at runtime | Blocks in 32×32×32 chunks, held by a CPU `World` the game reads back at once; `set_block` reaches the GPU the next frame, `edit_region` within a per-frame budget in cubes, nearest chunks first; a fixed capacity in cubes, set at construction, and a capacity of 0 means no culling buffers are created |
+| Static cubes | the `Scene`, editable at runtime | Blocks in 32×32×32 chunks, held by a CPU `World` the game reads back at once; a block whose six neighbours are all occupied is buried and never uploaded; `set_block` reaches the GPU the next frame, `edit_region` within a per-frame budget in cubes, nearest chunks first; a fixed capacity in cubes, buried ones included, set at construction, and a capacity of 0 means no culling buffers are created |
 | Dynamic models | the `Scene`, by id | Slots are reused behind generational `DynamicId`s, so a removed model's id reaches nothing; a fixed capacity in cubes, set at construction |
 | Skybox | the `Scene`, optional | A `.hdr` is decoded on the CPU, projected onto a `TextureCube` by a compute pass at load time, then sampled linearly |
 
-A cube is a `CubeRaw` — a model matrix and a colour, 80 bytes — read as
-instance attributes at locations 3 to 7, and as a storage array by the culling
-shader. The same struct is all three: the static array, the visible array the
-culling writes, and the dynamic buffer.
+A static cube is a `StaticCubeRaw` — a position and an sRGB-packed 8-bit
+colour, 16 bytes — since static cubes are unit cubes on the axes. The culling
+shader reads them as a storage array and writes the indices of the visible ones;
+the static pipeline (`static_cube.wgsl`) reads both from storage, with no
+instance buffer. A dynamic cube is a `CubeRaw` — a model matrix and a float
+colour, 80 bytes — read as instance attributes at locations 3 to 7 by
+`cube.wgsl`. Both pipelines append the same fragment shader, `shading.wgsl`.
+
+The `World` keeps each chunk dense: a 32³-bit occupancy mask, one sRGB-packed
+colour per cell — the same `u32` the GPU draws, copied as is — the number of
+blocks, and a list of the cubes off the grid. A cube is a block when every
+coordinate is finite, under 2²⁴ in magnitude and within 1e-4 of an integer;
+any other is off the grid, always drawn and burying nothing. A block is
+exposed when one of the six cells it shares a face with is empty, a missing
+chunk counting as empty; a chunk's instances are its exposed blocks by cell,
+then its off-grid cubes in the order they came. When an edit fills or empties
+a cell on a face of its chunk, the chunk across that face is rebuilt too,
+with the same priority, since a block of it may have been uncovered or
+buried; a change of colour alone rebuilds only its own chunk. The rebuild
+budget counts what a chunk will send, exactly.
 
 ---
 
@@ -926,15 +944,15 @@ the binaries with `include_bytes!` so nothing has to be found at runtime.
 | `crates/etib/src/shaders/` | `post.wgsl`, `blit.wgsl` |
 | `crates/etib-scene/src/scene.rs` | `Scene`: what it owns, and the order a frame is recorded in |
 | `crates/etib-scene/src/camera.rs` | `Camera`, `CameraRaw`, `CameraController`, `Move` |
-| `crates/etib-scene/src/cube.rs` | The cube mesh, `Vertex`, `CubeRaw` and their vertex layouts |
+| `crates/etib-scene/src/cube.rs` | The cube mesh, `Vertex`, `CubeRaw`, `StaticCubeRaw` and its colour packing |
 | `crates/etib-scene/src/model.rs` | `.model` files: `ModelCube`, `parse_model`, `load_model`, `save_model` |
 | `crates/etib-scene/src/dynamic.rs` | `DynamicModel`, and the slots the scene keeps them in |
 | `crates/etib-scene/src/culling.rs` | Chunk keys, the two culling passes, the static cubes' fixed-capacity buffers and the rebuild of one chunk |
-| `crates/etib-scene/src/world.rs` | `World`: the blocks by chunk, the capacity, which chunks wait for a rebuild; `BlockEdit` |
+| `crates/etib-scene/src/world.rs` | `World`: the blocks in dense chunks (an occupancy mask and an sRGB colour per cell), the capacity, which blocks are exposed, which chunks wait for a rebuild; `BlockEdit` |
 | `crates/etib-scene/src/slots.rs` | `SlotAllocator`: the free slots of the static instance buffer, handed out in pieces |
 | `crates/etib-scene/src/rebuild.rs` | `plan_rebuilds`: which waiting chunks are written this frame; `DEFAULT_REBUILD_BUDGET` |
 | `crates/etib-scene/src/skybox.rs` | `.hdr` decoding, the equirectangular projection, the skybox pass |
-| `crates/etib-scene/src/shaders/` | `cube.wgsl`, `cull.wgsl`, `chunk_cull.wgsl`, `skybox.wgsl`, `equirectangular.wgsl` |
+| `crates/etib-scene/src/shaders/` | `cube.wgsl`, `static_cube.wgsl`, `shading.wgsl`, `cull.wgsl`, `chunk_cull.wgsl`, `skybox.wgsl`, `equirectangular.wgsl` |
 | `crates/etib-input/src/input.rs` | `Input`: keyboard and mouse state, the per-frame cycle, focus loss |
 | `crates/etib-input/src/held.rs` | `Held<T>`: down / just pressed / just released, shared by keys and buttons |
 | `crates/etib-input/src/gamepad.rs` | `Gamepads`, `Gamepad`, the dead zone; gilrs, behind the `gamepad` feature |

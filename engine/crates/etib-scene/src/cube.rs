@@ -3,7 +3,8 @@
 use etib_core::{StepMode, VertexAttribute, VertexFormat, VertexLayout};
 use glam::{Mat4, Vec3, Vec4};
 
-/// One corner of the cube mesh. Mirrors `VertexInput` in `cube.wgsl`.
+/// One corner of the cube mesh. Mirrors `VertexInput` in `cube.wgsl` and
+/// `static_cube.wgsl`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -148,6 +149,32 @@ impl CubeRaw {
     };
 }
 
+/// One static cube as the GPU sees it: 16 bytes rather than [`CubeRaw`]'s 80.
+/// Static cubes are unit cubes on the axes, so a position is all the
+/// transform they need. Mirrors `StaticCube` in `cull.wgsl` and
+/// `static_cube.wgsl`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct StaticCubeRaw {
+    /// The cube's centre, in world units.
+    pub position: [f32; 3],
+    /// sRGB-encoded RGBA, 8 bits each, red in the low byte; alpha is 255.
+    /// See [`StaticCubeRaw::new`].
+    pub color: u32,
+}
+
+impl StaticCubeRaw {
+    /// A cube at `position`, coloured `color` in linear RGB. Each channel is
+    /// clamped to 0..1 and stored sRGB-encoded on 8 bits, which keeps dark
+    /// colours from banding as linear 8-bit values would.
+    pub fn new(position: Vec3, color: Vec3) -> Self {
+        Self {
+            position: position.to_array(),
+            color: pack_srgb8(color),
+        }
+    }
+}
+
 /// `linear` clamped to 0..1, sRGB-encoded and rounded to 8 bits per channel,
 /// red in the low byte and an opaque alpha in the high one: what WGSL's
 /// `unpack4x8unorm` reads back.
@@ -240,6 +267,15 @@ mod tests {
         } else {
             ((encoded + 0.055) / 1.055).powf(2.4)
         }
+    }
+
+    #[test]
+    fn static_instances_are_sixteen_bytes() {
+        assert_eq!(size_of::<StaticCubeRaw>(), 16);
+        assert_eq!(std::mem::offset_of!(StaticCubeRaw, color), 12);
+        let raw = StaticCubeRaw::new(Vec3::new(1.0, 2.0, 3.0), Vec3::ONE);
+        assert_eq!(raw.position, [1.0, 2.0, 3.0]);
+        assert_eq!(raw.color, 0xFFFF_FFFF);
     }
 
     #[test]

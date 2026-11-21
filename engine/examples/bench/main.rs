@@ -271,7 +271,7 @@ impl BenchApp {
                 warmup_frames: WARMUP_FRAMES,
                 measured_frames: MEASURED_FRAMES,
                 generated_cubes: self.generated_cubes,
-                kept_cubes: self.scene.static_count(),
+                kept_cubes: self.scene.static_exposed_count(),
                 dynamic_cubes: self.dynamic_cubes,
                 rebuild_frames: self.rebuild_frames,
             },

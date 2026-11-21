@@ -11,9 +11,10 @@ struct AABB {
     max: vec3<f32>,
 }
 
-struct CubeRaw {
-    model: mat4x4<f32>,
-    color: vec4<f32>,
+// Mirrors StaticCubeRaw: 16 bytes, the colour packed in the last four.
+struct StaticCube {
+    position: vec3<f32>,
+    color: u32,
 }
 
 struct DrawIndexedIndirectArgs {
@@ -28,10 +29,10 @@ struct DrawIndexedIndirectArgs {
 var<uniform> camera: CameraUniform;
 
 @group(1) @binding(0)
-var<storage, read> all_instances: array<CubeRaw>;
+var<storage, read> all_instances: array<StaticCube>;
 
 @group(1) @binding(1)
-var<storage, read_write> visible_instances: array<CubeRaw>;
+var<storage, read_write> visible_indices: array<u32>;
 
 @group(1) @binding(2)
 var<storage, read_write> draw_cmd: DrawIndexedIndirectArgs;
@@ -56,18 +57,6 @@ fn intersects_aabb(aabb: AABB) -> bool {
     return true;
 }
 
-fn get_aabb_from_instance(model: mat4x4<f32>) -> AABB {
-    let world_center = model[3].xyz;
-    let right = model[0].xyz;
-    let up = model[1].xyz;
-    let forward = model[2].xyz;
-    let new_extent_x = (abs(right.x) + abs(up.x) + abs(forward.x)) * 0.5;
-    let new_extent_y = (abs(right.y) + abs(up.y) + abs(forward.y)) * 0.5;
-    let new_extent_z = (abs(right.z) + abs(up.z) + abs(forward.z)) * 0.5;
-    let new_extent = vec3<f32>(new_extent_x, new_extent_y, new_extent_z);
-    return AABB(world_center - new_extent, world_center + new_extent);
-}
-
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
@@ -80,12 +69,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let instance = all_instances[index];
-    let aabb = get_aabb_from_instance(instance.model);
+    // Static cubes are unit cubes on the axes.
+    let center = all_instances[index].position;
+    let aabb = AABB(center - vec3<f32>(0.5), center + vec3<f32>(0.5));
 
     // 2. Per-cube frustum culling
     if (intersects_aabb(aabb)) {
         let out_index = atomicAdd(&draw_cmd.instance_count, 1u);
-        visible_instances[out_index] = instance;
+        visible_indices[out_index] = index;
     }
 }
