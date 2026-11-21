@@ -108,7 +108,7 @@ mod lut;
 mod lut_error;
 mod post;
 
-pub use app::{App, Config, Frame, FrameStats, MAX_DT, run};
+pub use app::{App, Config, CpuWork, Frame, FrameStats, MAX_DT, run};
 pub use blit::Blit;
 pub use gpu::Gpu;
 pub use lut::Lut;

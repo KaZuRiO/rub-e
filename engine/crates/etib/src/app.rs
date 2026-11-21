@@ -84,6 +84,32 @@ pub struct FrameStats<'a> {
     /// frames between two of these, so code that must see each measured frame
     /// (a benchmark, a profiler) reads this rather than `gpu`.
     pub gpu_arrived: &'a [GpuTimings],
+    /// The CPU time the previous rendered frame took, or `None` before one
+    /// has. It is only known once that frame is presented, hence one frame
+    /// late.
+    pub cpu_work: Option<CpuWork>,
+}
+
+/// The CPU time one frame took from the start of its redraw to its present,
+/// without the time spent waiting for a swapchain image.
+///
+/// That wait belongs to the presentation, not to the frame: on macOS the
+/// compositor can hold the image back for whole refreshes, even with vsync
+/// off, so a frame time that counts it measures the system more than the
+/// work. This is the part the application and the engine are answerable for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CpuWork {
+    /// The [`FrameStats::frame_index`] of the frame that was measured.
+    pub tag: u64,
+    /// The work, in milliseconds.
+    pub ms: f32,
+}
+
+/// Milliseconds between `start` and `end`, less the wait from `acquire_start`
+/// to `acquire_end`.
+fn cpu_work_ms(start: Instant, acquire_start: Instant, acquire_end: Instant, end: Instant) -> f32 {
+    let work = (acquire_start - start) + (end - acquire_end);
+    work.as_secs_f32() * 1000.0
 }
 
 /// The longest step [`App::update`] is ever handed, in seconds.
@@ -170,6 +196,7 @@ where
         last_fps_log: Instant::now(),
         last_gpu: None,
         gpu_arrived: Vec::new(),
+        last_work: None,
         failure: None,
     };
 
@@ -206,6 +233,8 @@ struct Runner<A, F> {
     /// GPU results not yet shown to the app: a frame whose surface could not
     /// be acquired keeps them for the next one.
     gpu_arrived: Vec<GpuTimings>,
+    /// The work of the last frame presented, for the next frame's stats.
+    last_work: Option<CpuWork>,
     /// Why startup stopped, for `run` to return once the loop has exited.
     failure: Option<anyhow::Error>,
 }
@@ -261,6 +290,7 @@ where
             dt * 1000.0
         );
 
+        let acquire_start = Instant::now();
         let frame = match state.gpu.surface.acquire() {
             Acquired::Frame(frame) => frame,
             // The surface has already recovered as far as it can; try again.
@@ -275,6 +305,8 @@ where
             }
         };
 
+        let acquire_end = Instant::now();
+
         let stats = FrameStats {
             fps: self.fps,
             frame_index: self.frame_index,
@@ -282,6 +314,7 @@ where
             backend: state.gpu.device.backend(),
             gpu: self.last_gpu.as_ref(),
             gpu_arrived: &self.gpu_arrived,
+            cpu_work: self.last_work,
         };
 
         let mut encoder = state
@@ -298,6 +331,10 @@ where
 
         state.gpu.device.submit(encoder);
         frame.present(&state.gpu.device);
+        self.last_work = Some(CpuWork {
+            tag: self.frame_index,
+            ms: cpu_work_ms(now, acquire_start, acquire_end, Instant::now()),
+        });
         trace!("frame {} presented", self.frame_index);
 
         if state.app.exit_requested() {
@@ -470,6 +507,15 @@ mod tests {
     }
 
     #[test]
+    fn cpu_work_leaves_out_the_wait_for_the_swapchain() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        // 1 ms before acquiring, 30 ms waiting for an image, 2 ms after.
+        let work = cpu_work_ms(start, start + ms(1), start + ms(31), start + ms(33));
+        assert!((work - 3.0).abs() < 1e-3, "{work}");
+    }
+
+    #[test]
     fn frame_stats_carry_the_latest_gpu_timings() {
         let timings = GpuTimings {
             tag: 7,
@@ -486,6 +532,7 @@ mod tests {
             backend: "test",
             gpu: Some(&timings),
             gpu_arrived: std::slice::from_ref(&timings),
+            cpu_work: None,
         };
         assert_eq!(stats.gpu, Some(&timings));
         assert_eq!(stats.gpu_arrived, std::slice::from_ref(&timings));

@@ -277,6 +277,7 @@ impl BenchApp {
             },
             gpu_timing: gpu.device.gpu_timing_available(),
             cpu_frame: measured.cpu_frame,
+            cpu_work: measured.cpu_work,
             gpu_total: measured.gpu_total,
             passes: measured.passes,
         };
@@ -389,6 +390,9 @@ impl App for BenchApp {
         // collector ignores those it has already counted.
         for timings in stats.gpu_arrived {
             self.collector.timings(timings);
+        }
+        if let Some(work) = &stats.cpu_work {
+            self.collector.cpu_work(work);
         }
         if let Err(err) = self.collector.frame_rendered(
             stats.frame_index,

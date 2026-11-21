@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::bail;
-use etib::GpuTimings;
+use etib::{CpuWork, GpuTimings};
 use serde::{Deserialize, Serialize};
 
 use crate::scenario::{GRACE_FRAMES, MEASURED_FRAMES, WARMUP_FRAMES};
@@ -50,6 +50,9 @@ pub fn summarize(samples: &[f32]) -> Option<Summary> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Measurements {
     pub cpu_frame: Summary,
+    /// The CPU time of the measured frames without the wait for a swapchain
+    /// image; `None` when none was reported.
+    pub cpu_work: Option<Summary>,
     /// `None` when no GPU measurement was accepted.
     pub gpu_total: Option<Summary>,
     /// Per-pass GPU times, in order of first appearance; `None` for a pass
@@ -65,6 +68,9 @@ pub struct Collector {
     /// `frame_index` -> bench frame, for every rendered frame.
     frames: HashMap<u64, u32>,
     cpu_ms: Vec<f32>,
+    /// Tags whose CPU work was recorded, so none counts twice.
+    worked: HashSet<u64>,
+    cpu_work_ms: Vec<f32>,
     /// Measured bench frames already recorded; a repeat keeps the first dt.
     measured_seen: HashSet<u32>,
     /// Tags whose GPU result was accepted, so none counts twice.
@@ -84,6 +90,8 @@ impl Collector {
             gpu_timing,
             frames: HashMap::new(),
             cpu_ms: Vec::new(),
+            worked: HashSet::new(),
+            cpu_work_ms: Vec::new(),
             measured_seen: HashSet::new(),
             accepted: HashSet::new(),
             gpu_total_ms: Vec::new(),
@@ -115,6 +123,18 @@ impl Collector {
             self.cpu_ms.push(dt * 1000.0);
         }
         Ok(())
+    }
+
+    /// Records the CPU work of one frame, reported a frame late. Work for
+    /// frames that are unknown or not measured, and repeats, are ignored; the
+    /// last measured frame's arrives after the run is done and is lost.
+    pub fn cpu_work(&mut self, work: &CpuWork) {
+        let Some(&bench_frame) = self.frames.get(&work.tag) else {
+            return;
+        };
+        if is_measured(bench_frame) && self.worked.insert(work.tag) {
+            self.cpu_work_ms.push(work.ms);
+        }
     }
 
     /// Records the GPU timings of one frame. Results for frames that are
@@ -167,6 +187,7 @@ impl Collector {
         };
         Measurements {
             cpu_frame: summarize(&self.cpu_ms).unwrap_or(empty),
+            cpu_work: summarize(&self.cpu_work_ms),
             gpu_total: summarize(&self.gpu_total_ms),
             passes: self
                 .passes
@@ -180,7 +201,7 @@ impl Collector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use etib::PassTime;
+    use etib::{CpuWork, PassTime};
 
     fn pass(label: &str, ms: f32) -> PassTime {
         PassTime {
@@ -211,6 +232,27 @@ mod tests {
             c.frame_rendered(1000 + f as u64, f, 0.002, (1280, 720))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn cpu_work_counts_measured_frames_once() {
+        let mut c = Collector::new((1280, 720), true);
+        c.frame_rendered(5, 0, 0.01, (1280, 720)).unwrap(); // warmup
+        c.frame_rendered(6, WARMUP_FRAMES, 0.01, (1280, 720))
+            .unwrap();
+        c.frame_rendered(7, WARMUP_FRAMES + 1, 0.01, (1280, 720))
+            .unwrap();
+        assert!(c.finish().cpu_work.is_none());
+        c.cpu_work(&CpuWork { tag: 5, ms: 9.0 });
+        c.cpu_work(&CpuWork { tag: 99, ms: 9.0 });
+        c.cpu_work(&CpuWork { tag: 6, ms: 1.0 });
+        c.cpu_work(&CpuWork { tag: 6, ms: 9.0 });
+        c.cpu_work(&CpuWork { tag: 7, ms: 3.0 });
+        let work = c.finish().cpu_work.unwrap();
+        assert_eq!(
+            (work.samples, work.mean_ms, work.max_ms),
+            (2, 2.0, Some(3.0))
+        );
     }
 
     #[test]

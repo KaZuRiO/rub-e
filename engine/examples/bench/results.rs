@@ -52,6 +52,11 @@ pub struct RunResults {
     pub scenario: ScenarioInfo,
     pub gpu_timing: bool,
     pub cpu_frame: Summary,
+    /// The CPU time of a frame without the wait for a swapchain image, which
+    /// on macOS can last whole refreshes and dominates `cpu_frame`. `None` in
+    /// runs saved before it was recorded.
+    #[serde(default)]
+    pub cpu_work: Option<Summary>,
     pub gpu_total: Option<Summary>,
     /// `None` for a pass that was never measured. Runs saved before this
     /// could be `None` read back as before.
@@ -147,6 +152,7 @@ pub mod tests {
             },
             gpu_timing: true,
             cpu_frame: s(5.0),
+            cpu_work: Some(s(1.0)),
             gpu_total: Some(s(4.5)),
             passes: vec![("scene".into(), Some(s(4.0)))],
         }
@@ -162,6 +168,14 @@ pub mod tests {
         json["cpu_frame"].as_object_mut().unwrap().remove("max_ms");
         let run: RunResults = serde_json::from_value(json).unwrap();
         assert_eq!(run.cpu_frame.max_ms, None);
+    }
+
+    #[test]
+    fn a_run_saved_before_cpu_work_has_none() {
+        let mut json = serde_json::to_value(sample_run("old")).unwrap();
+        json.as_object_mut().unwrap().remove("cpu_work");
+        let run: RunResults = serde_json::from_value(json).unwrap();
+        assert_eq!(run.cpu_work, None);
     }
 
     #[test]

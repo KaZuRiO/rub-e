@@ -147,6 +147,8 @@ pub fn compare(a: &RunResults, b: &RunResults) -> String {
         ["", "median a", "p95 a", "median b", "p95 b", "Δ ms", "Δ %"].map(String::from),
         row("frame CPU", Some(&a.cpu_frame), Some(&b.cpu_frame)),
         max_row("frame CPU max", Some(&a.cpu_frame), Some(&b.cpu_frame)),
+        row("CPU work", a.cpu_work.as_ref(), b.cpu_work.as_ref()),
+        max_row("CPU work max", a.cpu_work.as_ref(), b.cpu_work.as_ref()),
         row("GPU total", a.gpu_total.as_ref(), b.gpu_total.as_ref()),
     ];
     fn find<'a>(run: &'a RunResults, label: &str) -> Option<&'a Summary> {
@@ -338,6 +340,21 @@ mod tests {
                 .contains(DASH),
             "{out}"
         );
+    }
+
+    #[test]
+    fn compare_shows_the_cpu_work_and_a_dash_for_an_older_run() {
+        let (mut a, mut b) = (run("a", 4.0), run("b", 4.0));
+        a.cpu_work.as_mut().unwrap().median_ms = 0.8;
+        b.cpu_work.as_mut().unwrap().median_ms = 0.6;
+        let out = compare(&a, &b);
+        let line = out.lines().find(|l| l.starts_with("CPU work ")).unwrap();
+        assert!(line.contains("0.80") && line.contains("-25.0%"), "{out}");
+        assert!(out.lines().any(|l| l.starts_with("CPU work max")), "{out}");
+        a.cpu_work = None;
+        let out = compare(&a, &b);
+        let line = out.lines().find(|l| l.starts_with("CPU work ")).unwrap();
+        assert!(line.contains(DASH), "{out}");
     }
 
     #[test]
