@@ -370,7 +370,7 @@ impl Scene {
                     priority,
                     distance: centre.distance(eye),
                     old_len: statics.gpu_len(key),
-                    new_len: self.world.chunk_len(key),
+                    new_len: self.world.sent_len(key),
                 }
             })
             .collect();
@@ -884,6 +884,71 @@ mod tests {
         render_once(&device, &mut scene);
         assert_eq!(visible_count(&device, &scene), 1);
         same_as_fresh(&device, &scene, &[white_cube(0.0, 0.0, 0.0)]);
+    }
+
+    #[test]
+    fn removing_a_block_on_a_chunk_face_uncovers_the_neighbour() {
+        let Some(device) = device() else { return };
+        // Cells 30..=33 on X, 0..=2 on Y and Z: two chunks along X, with
+        // (31, 1, 1) and (32, 1, 1) buried.
+        let mut cubes = Vec::new();
+        for x in 30..=33 {
+            for y in 0..=2 {
+                for z in 0..=2 {
+                    cubes.push(white_cube(x as f32, y as f32, z as f32));
+                }
+            }
+        }
+        let mut scene = Scene::new(&device, &cubes, cubes.len(), 1, 64, 64);
+        render_once(&device, &mut scene);
+        scene.remove_block(IVec3::new(31, 1, 1));
+        render_once(&device, &mut scene);
+        assert_eq!(scene.pending_rebuilds(), 0);
+        cubes.retain(|c| c.position != Vec3::new(31.0, 1.0, 1.0));
+        assert_eq!(cubes.len(), 35);
+        same_as_fresh(&device, &scene, &cubes);
+    }
+
+    #[test]
+    fn an_explosion_that_uncovers_buried_cubes_never_fails() {
+        let Some(device) = device() else { return };
+        // A solid 8³ block across eight chunks, its centre on their corner.
+        let min = IVec3::splat(28);
+        let max = min + 7;
+        let centre = IVec3::splat(32);
+        let mut blocks = BTreeMap::new();
+        for x in min.x..=max.x {
+            for y in min.y..=max.y {
+                for z in min.z..=max.z {
+                    blocks.insert([x, y, z], colour(x + 3 * y + 7 * z));
+                }
+            }
+        }
+        let cubes = block_cubes(&blocks);
+        assert_eq!(cubes.len(), 512);
+        let mut scene = Scene::new(&device, &cubes, 512, 1, 64, 64);
+        render_once(&device, &mut scene);
+
+        let in_ball = |cell: IVec3| (cell - centre).length_squared() <= 9;
+        scene
+            .edit_region(centre - 3, centre + 3, |cell| {
+                if in_ball(cell) {
+                    BlockEdit::Remove
+                } else {
+                    BlockEdit::Keep
+                }
+            })
+            .unwrap();
+        blocks.retain(|cell, _| !in_ball(IVec3::from_array(*cell)));
+        for _ in 0..16 {
+            if scene.pending_rebuilds() == 0 {
+                break;
+            }
+            render_once(&device, &mut scene);
+        }
+        assert_eq!(scene.pending_rebuilds(), 0);
+        same_as_fresh(&device, &scene, &block_cubes(&blocks));
+        scene.set_block(centre, Vec3::ONE).unwrap();
     }
 
     #[test]

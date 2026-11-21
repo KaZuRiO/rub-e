@@ -112,20 +112,92 @@ impl Chunk {
         was_full
     }
 
-    /// The cells holding a block, in increasing order.
-    fn indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.occupied.iter().enumerate().flat_map(|(word, &bits)| {
-            let mut bits = bits;
-            std::iter::from_fn(move || {
-                if bits == 0 {
-                    return None;
-                }
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                Some(word * 64 + bit)
-            })
-        })
+    /// The occupancy of row `row` (`y + 32·z`), bit `x` for cell `x`. A
+    /// word holds two rows: `y` even in its low half, odd in its high half.
+    #[expect(clippy::cast_possible_truncation, reason = "one half of the word")]
+    fn row(&self, row: usize) -> u32 {
+        (self.occupied[row / 2] >> (32 * (row % 2))) as u32
     }
+}
+
+/// Rows of cells along X in a chunk, one for each (Y, Z).
+const ROWS: usize = 32 * 32;
+
+/// The occupancy of row `row` in a chunk that may not exist, empty if not.
+fn row_of(chunk: Option<&Chunk>, row: usize) -> u32 {
+    chunk.map_or(0, |chunk| chunk.row(row))
+}
+
+/// A chunk with the six chunks across its faces, looked up once, to tell its
+/// exposed blocks from the buried ones: a block is exposed when one of the
+/// six cells it shares a face with is empty, a missing chunk counting as
+/// empty. Off-grid cubes are always exposed and bury nothing.
+struct Exposure<'a> {
+    chunk: &'a Chunk,
+    /// The chunks across the faces at -X, +X, -Y, +Y, -Z and +Z.
+    neighbours: [Option<&'a Chunk>; 6],
+}
+
+impl<'a> Exposure<'a> {
+    fn new(chunks: &'a BTreeMap<ChunkKey, Chunk>, key: ChunkKey) -> Option<Self> {
+        let chunk = chunks.get(&key)?;
+        let neighbours = FACES.map(|face| chunks.get(&face_neighbour(key, face)));
+        Some(Self { chunk, neighbours })
+    }
+
+    /// The exposed blocks of row `row` (`y + 32·z`), bit `x` for cell `x`.
+    fn row(&self, row: usize) -> u32 {
+        let [west, east, down, up, back, front] = self.neighbours;
+        let (y, z) = (row % 32, row / 32);
+        let here = self.chunk.row(row);
+        // Each neighbour's occupancy brought to the bit of the cell beside it.
+        let minus_x = here << 1 | row_of(west, row) >> 31;
+        let plus_x = here >> 1 | (row_of(east, row) & 1) << 31;
+        let minus_y = if y > 0 {
+            self.chunk.row(row - 1)
+        } else {
+            row_of(down, row + 31)
+        };
+        let plus_y = if y < 31 {
+            self.chunk.row(row + 1)
+        } else {
+            row_of(up, row - 31)
+        };
+        let minus_z = if z > 0 {
+            self.chunk.row(row - 32)
+        } else {
+            row_of(back, row + 31 * 32)
+        };
+        let plus_z = if z < 31 {
+            self.chunk.row(row + 32)
+        } else {
+            row_of(front, row - 31 * 32)
+        };
+        here & !(minus_x & plus_x & minus_y & plus_y & minus_z & plus_z)
+    }
+}
+
+/// The faces of a chunk, as the axis across them and the side.
+const FACES: [(usize, i32); 6] = [(0, -1), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)];
+
+/// The chunk across `face` of chunk `key`.
+fn face_neighbour(key: ChunkKey, (axis, side): (usize, i32)) -> ChunkKey {
+    let mut neighbour = key;
+    neighbour[axis] += side;
+    neighbour
+}
+
+/// The faces of its chunk `cell` touches, as a bit for each of [`FACES`].
+fn faces_touched(cell: IVec3) -> u8 {
+    let local = cell.rem_euclid(IVec3::splat(SIDE)).to_array();
+    let mut faces = 0;
+    for (bit, &(axis, side)) in FACES.iter().enumerate() {
+        let edge = if side < 0 { 0 } else { SIDE - 1 };
+        if local[axis] == edge {
+            faces |= 1 << bit;
+        }
+    }
+    faces
 }
 
 /// Every static cube, by chunk, and the chunks changed since the GPU last saw
@@ -250,8 +322,8 @@ impl World {
             Some(_) => {}
             None => self.check(self.count + 1)?,
         }
-        self.put(cell, packed);
-        self.mark(chunk_of_cell(cell), Priority::Immediate);
+        let filled = self.put(cell, packed);
+        self.mark_cell(cell, Priority::Immediate, filled);
         Ok(())
     }
 
@@ -259,7 +331,7 @@ impl World {
     /// alone, and so are off-grid cubes.
     pub fn remove_block(&mut self, cell: IVec3) {
         if self.take(cell) {
-            self.mark(chunk_of_cell(cell), Priority::Immediate);
+            self.mark_cell(cell, Priority::Immediate, true);
         }
     }
 
@@ -358,18 +430,22 @@ impl World {
         self.check(needed)?;
 
         // Cells come in scan order, so runs of one chunk are long: one lookup
-        // and one mark for each, not for each cell.
+        // and one mark for each, not for each cell. The chunks across the
+        // faces the filled or emptied cells touch are marked too, once a run.
         for run in removes.chunk_by(|a, b| chunk_of_cell(*a) == chunk_of_cell(*b)) {
             let key = chunk_of_cell(run[0]);
             let chunk = self.chunks.get_mut(&key).expect("it held these blocks");
+            let mut faces = 0;
             for &cell in run {
                 chunk.remove(local_index(cell));
+                faces |= faces_touched(cell);
             }
             self.count -= run.len();
             if chunk.len() == 0 {
                 self.chunks.remove(&key);
             }
             self.mark(key, Priority::Budget);
+            self.mark_across(key, faces, Priority::Budget);
         }
         for (key, places) in doomed {
             let chunk = self.chunks.get_mut(&key).expect("it held these cubes");
@@ -389,10 +465,15 @@ impl World {
         for run in sets.chunk_by(|a, b| chunk_of_cell(a.0) == chunk_of_cell(b.0)) {
             let key = chunk_of_cell(run[0].0);
             let chunk = self.chunks.entry(key).or_default();
+            let mut faces = 0;
             for &(cell, packed) in run {
-                self.count += usize::from(chunk.insert(local_index(cell), packed));
+                if chunk.insert(local_index(cell), packed) {
+                    self.count += 1;
+                    faces |= faces_touched(cell);
+                }
             }
             self.mark(key, Priority::Budget);
+            self.mark_across(key, faces, Priority::Budget);
         }
         Ok(())
     }
@@ -402,23 +483,32 @@ impl World {
         self.chunks.keys().copied()
     }
 
-    /// What the GPU draws for chunk `key`: its blocks by cell, then its
-    /// off-grid cubes in the order they came. Empty for a chunk that no
-    /// longer holds anything. The same cubes always give the same instances.
+    /// What the GPU draws for chunk `key`: its exposed blocks by cell, then
+    /// its off-grid cubes in the order they came. A block is exposed when one
+    /// of the six cells it shares a face with is empty, a missing chunk
+    /// counting as empty; off-grid cubes are always drawn and bury nothing.
+    /// Empty for a chunk that no longer holds anything. The same cubes always
+    /// give the same instances.
     pub fn instances(&self, key: ChunkKey) -> Vec<CubeRaw> {
-        let Some(chunk) = self.chunks.get(&key) else {
+        let Some(exposure) = Exposure::new(&self.chunks, key) else {
             return Vec::new();
         };
+        let chunk = exposure.chunk;
         let block = |position: Vec3, color: Vec3| {
             CubeRaw::new(Mat4::from_translation(position), color.extend(1.0))
         };
-        let mut instances = Vec::with_capacity(chunk.len());
-        instances.extend(chunk.indices().map(|index| {
-            block(
-                cell_at(key, index).as_vec3(),
-                unpack_srgb8(chunk.colors[index]),
-            )
-        }));
+        let mut instances = Vec::new();
+        for row in 0..ROWS {
+            let mut bits = exposure.row(row);
+            while bits != 0 {
+                let index = row * 32 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                instances.push(block(
+                    cell_at(key, index).as_vec3(),
+                    unpack_srgb8(chunk.colors[index]),
+                ));
+            }
+        }
         instances.extend(
             chunk
                 .off_grid
@@ -428,11 +518,14 @@ impl World {
         instances
     }
 
-    /// How many cubes chunk `key` holds.
-    pub fn chunk_len(&self, key: ChunkKey) -> u32 {
-        self.chunks.get(&key).map_or(0, |chunk| {
-            u32::try_from(chunk.len())
-                .expect("a chunk holds at most 32^3 blocks and the off-grid cubes given")
+    /// How many instances [`instances`](Self::instances) gives for chunk
+    /// `key`, exactly.
+    pub fn sent_len(&self, key: ChunkKey) -> u32 {
+        Exposure::new(&self.chunks, key).map_or(0, |exposure| {
+            let blocks: u32 = (0..ROWS).map(|row| exposure.row(row).count_ones()).sum();
+            let off_grid = u32::try_from(exposure.chunk.off_grid.len())
+                .expect("a chunk holds fewer off-grid cubes than u32::MAX");
+            blocks + off_grid
         })
     }
 
@@ -464,10 +557,12 @@ impl World {
             .color(local_index(cell))
     }
 
-    /// Puts a block without marking anything.
-    fn put(&mut self, cell: IVec3, packed: u32) {
+    /// Puts a block without marking anything; `true` if the cell was empty.
+    fn put(&mut self, cell: IVec3, packed: u32) -> bool {
         let chunk = self.chunks.entry(chunk_of_cell(cell)).or_default();
-        self.count += usize::from(chunk.insert(local_index(cell), packed));
+        let filled = chunk.insert(local_index(cell), packed);
+        self.count += usize::from(filled);
+        filled
     }
 
     /// Takes a block out without marking anything; `false` if there was none.
@@ -491,6 +586,29 @@ impl World {
         let entry = self.dirty.entry(key).or_insert(priority);
         if priority == Priority::Immediate {
             *entry = Priority::Immediate;
+        }
+    }
+
+    /// Marks the chunk of `cell` to rebuild and, if the cell was filled or
+    /// emptied, every existing chunk across a face it touches: what those
+    /// show depends on it.
+    fn mark_cell(&mut self, cell: IVec3, priority: Priority, occupancy_changed: bool) {
+        let key = chunk_of_cell(cell);
+        self.mark(key, priority);
+        if occupancy_changed {
+            self.mark_across(key, faces_touched(cell), priority);
+        }
+    }
+
+    /// Marks every existing chunk across the `faces` of chunk `key` (a bit
+    /// for each of [`FACES`]). A missing chunk shows nothing to update and is
+    /// never created for it.
+    fn mark_across(&mut self, key: ChunkKey, faces: u8, priority: Priority) {
+        for (bit, &face) in FACES.iter().enumerate() {
+            let neighbour = face_neighbour(key, face);
+            if faces & 1 << bit != 0 && self.chunks.contains_key(&neighbour) {
+                self.mark(neighbour, priority);
+            }
         }
     }
 }
@@ -565,18 +683,6 @@ mod tests {
         let mut w = world(1);
         w.set_block(IVec3::new(-1, 0, 0), RED).unwrap();
         assert_eq!(w.chunk_keys().collect::<Vec<_>>(), [[-1, 0, 0]]);
-    }
-
-    #[test]
-    fn a_block_on_a_border_rebuilds_only_its_own_chunk() {
-        let mut w = world(4);
-        w.set_block(IVec3::new(32, 0, 0), RED).unwrap();
-        w.clean([1, 0, 0]);
-        w.set_block(IVec3::new(31, 0, 0), RED).unwrap();
-        assert_eq!(
-            w.dirty().collect::<Vec<_>>(),
-            [([0, 0, 0], Priority::Immediate)]
-        );
     }
 
     #[test]
@@ -725,5 +831,223 @@ mod tests {
         w.edit_region(IVec3::ZERO, IVec3::ZERO, |_| BlockEdit::Set(c + 1e-5))
             .unwrap();
         assert_eq!(w.dirty().count(), 0);
+    }
+
+    fn cube_at(p: Vec3) -> ModelCube {
+        ModelCube {
+            position: p,
+            color: Vec3::new(0.5, 0.25, 1.0),
+        }
+    }
+
+    /// A solid `size`³ block with its lowest corner at `min`.
+    fn block(min: IVec3, size: i32) -> Vec<ModelCube> {
+        let mut cubes = Vec::new();
+        for x in 0..size {
+            for y in 0..size {
+                for z in 0..size {
+                    cubes.push(cube_at((min + IVec3::new(x, y, z)).as_vec3()));
+                }
+            }
+        }
+        cubes
+    }
+
+    fn from_cubes(cubes: &[ModelCube]) -> World {
+        World::new(cubes, cubes.len())
+    }
+
+    /// Where an instance is drawn.
+    fn position(cube: &CubeRaw) -> Vec3 {
+        Vec3::from_slice(&cube.model[3][..3])
+    }
+
+    /// Every instance sent, across all chunks, by position.
+    fn exposed_positions(world: &World) -> Vec<Vec3> {
+        world
+            .chunk_keys()
+            .flat_map(|key| world.instances(key))
+            .map(|cube| position(&cube))
+            .collect()
+    }
+
+    fn exposed_set(world: &World) -> BTreeSet<[i32; 3]> {
+        exposed_positions(world)
+            .into_iter()
+            .map(|p| p.round().as_ivec3().to_array())
+            .collect()
+    }
+
+    #[test]
+    fn a_lone_cube_is_exposed() {
+        let world = from_cubes(&[cube_at(Vec3::new(3.0, 4.0, 5.0))]);
+        assert_eq!(exposed_positions(&world), [Vec3::new(3.0, 4.0, 5.0)]);
+        assert_eq!(world.cube_count(), 1);
+    }
+
+    #[test]
+    fn the_centre_of_a_3x3x3_block_is_buried() {
+        let world = from_cubes(&block(IVec3::ZERO, 3));
+        let exposed = exposed_set(&world);
+        assert_eq!(exposed.len(), 26);
+        assert!(!exposed.contains(&[1, 1, 1]));
+        assert_eq!(world.cube_count(), 27);
+    }
+
+    #[test]
+    fn neighbours_are_found_across_chunks() {
+        // x = 30, 31 in chunk 0 and x = 32 in chunk 1.
+        let world = from_cubes(&block(IVec3::new(30, 0, 0), 3));
+        assert_eq!(world.chunk_keys().count(), 2);
+        let exposed = exposed_set(&world);
+        assert_eq!(exposed.len(), 26);
+        assert!(!exposed.contains(&[31, 1, 1]));
+    }
+
+    #[test]
+    fn negative_coordinates_land_in_negative_chunks() {
+        // -3..=-1 on every axis: all in chunk (-1, -1, -1).
+        let world = from_cubes(&block(IVec3::splat(-3), 3));
+        assert_eq!(world.chunk_keys().collect::<Vec<_>>(), [[-1, -1, -1]]);
+        let exposed = exposed_set(&world);
+        assert_eq!(exposed.len(), 26);
+        assert!(!exposed.contains(&[-2, -2, -2]));
+    }
+
+    #[test]
+    fn off_grid_cubes_are_never_buried_and_bury_nothing() {
+        let mut cubes = block(IVec3::ZERO, 3);
+        // The centre, moved half a cube along X.
+        cubes.retain(|c| c.position != Vec3::ONE);
+        cubes.push(cube_at(Vec3::new(1.5, 1.0, 1.0)));
+        let world = from_cubes(&cubes);
+        let exposed = exposed_positions(&world);
+        assert_eq!(exposed.len(), 27);
+        assert!(exposed.contains(&Vec3::new(1.5, 1.0, 1.0)));
+    }
+
+    #[test]
+    fn a_closed_cavity_keeps_its_walls() {
+        // A 5³ block with only its centre removed: the 98 cubes of the shell
+        // and the 6 that touch the hole are exposed.
+        let mut cubes = block(IVec3::ZERO, 5);
+        cubes.retain(|c| c.position != Vec3::splat(2.0));
+        let world = from_cubes(&cubes);
+        let exposed = exposed_set(&world);
+        assert_eq!(exposed.len(), 98 + 6);
+        assert!(exposed.contains(&[2, 2, 1]));
+        assert!(!exposed.contains(&[1, 1, 1]));
+    }
+
+    #[test]
+    fn duplicates_count_once() {
+        let p = Vec3::new(1.0, 2.0, 3.0);
+        let world = from_cubes(&[cube_at(p), cube_at(p)]);
+        assert_eq!(exposed_positions(&world), [p]);
+        assert_eq!(world.cube_count(), 1);
+    }
+
+    #[test]
+    fn colours_are_kept() {
+        let world = from_cubes(&[cube_at(Vec3::ZERO)]);
+        let raw = world.instances([0, 0, 0])[0];
+        let drawn = unpack_srgb8(pack_srgb8(Vec3::new(0.5, 0.25, 1.0)));
+        assert_eq!(raw.color, drawn.extend(1.0).to_array());
+    }
+
+    // Cells 30..=33 on X, 0..=2 on Y and Z: two chunks along X, (32, 1, 1) buried.
+    fn slab() -> World {
+        let mut cubes = Vec::new();
+        for x in 30..=33 {
+            for y in 0..=2 {
+                for z in 0..=2 {
+                    cubes.push(cube_at(IVec3::new(x, y, z).as_vec3()));
+                }
+            }
+        }
+        let mut w = from_cubes(&cubes);
+        assert_eq!(w.cube_count(), 36);
+        let keys: Vec<_> = w.chunk_keys().collect();
+        for key in keys {
+            w.clean(key);
+        }
+        w
+    }
+
+    #[test]
+    fn removing_a_face_cell_marks_the_neighbour_behind_it() {
+        let mut w = slab();
+        assert!(!exposed_set(&w).contains(&[32, 1, 1]));
+        w.remove_block(IVec3::new(31, 1, 1));
+        assert_eq!(
+            w.dirty().map(|(k, _)| k).collect::<Vec<_>>(),
+            [[0, 0, 0], [1, 0, 0]]
+        );
+        assert!(
+            w.instances([1, 0, 0])
+                .iter()
+                .any(|c| c.model[3][..3] == [32.0, 1.0, 1.0])
+        );
+    }
+
+    #[test]
+    fn recolouring_a_face_cell_rebuilds_only_its_chunk() {
+        let mut w = slab();
+        w.set_block(IVec3::new(31, 1, 1), BLUE).unwrap();
+        assert_eq!(w.dirty().map(|(k, _)| k).collect::<Vec<_>>(), [[0, 0, 0]]);
+    }
+
+    #[test]
+    fn a_corner_cell_marks_its_three_face_neighbours() {
+        // Blocks at (31, 31, 31) and in the three chunks across its faces.
+        let corner = IVec3::splat(31);
+        let mut w = from_cubes(&[
+            cube_at(corner.as_vec3()),
+            cube_at((corner + IVec3::X).as_vec3()),
+            cube_at((corner + IVec3::Y).as_vec3()),
+            cube_at((corner + IVec3::Z).as_vec3()),
+        ]);
+        w.remove_block(corner);
+        assert_eq!(
+            w.dirty().collect::<Vec<_>>(),
+            [
+                ([0, 0, 0], Priority::Immediate),
+                ([0, 0, 1], Priority::Immediate),
+                ([0, 1, 0], Priority::Immediate),
+                ([1, 0, 0], Priority::Immediate),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_face_cell_with_no_neighbour_chunk_marks_only_its_own() {
+        let mut w = world(1);
+        w.set_block(IVec3::new(31, 0, 0), RED).unwrap();
+        assert_eq!(w.dirty().map(|(k, _)| k).collect::<Vec<_>>(), [[0, 0, 0]]);
+        assert_eq!(w.chunk_keys().count(), 1);
+    }
+
+    #[test]
+    fn a_region_marks_neighbours_for_the_budget() {
+        let mut w = slab();
+        let cell = IVec3::new(31, 1, 1);
+        w.edit_region(cell, cell, |_| BlockEdit::Remove).unwrap();
+        assert_eq!(
+            w.dirty().collect::<Vec<_>>(),
+            [([0, 0, 0], Priority::Budget), ([1, 0, 0], Priority::Budget)]
+        );
+    }
+
+    #[test]
+    fn sent_len_counts_what_instances_returns() {
+        let mut opened = slab();
+        opened.remove_block(IVec3::new(31, 1, 1));
+        let mut off_grid = block(IVec3::ZERO, 3);
+        off_grid.push(cube_at(Vec3::new(1.5, 3.0, 1.0)));
+        for w in [slab(), opened, from_cubes(&off_grid)] {
+            for key in w.chunk_keys() {
+                assert_eq!(w.sent_len(key) as usize, w.instances(key).len());
+            }
+        }
     }
 }
