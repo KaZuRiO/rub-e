@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(models.cube_count(), 0);
         assert_eq!(
             err.to_string(),
-            "the dynamic models would hold 3 cubes, but the scene has room for 2"
+            "the change would make 3 cubes, but the scene has room for 2"
         );
     }
 

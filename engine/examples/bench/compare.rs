@@ -25,11 +25,14 @@ fn commit_label(run: &RunResults) -> String {
 
 fn header_line(run: &RunResults) -> String {
     format!(
-        "{} ({}, {} cubes generated, {} kept)",
+        "{} ({}, {}: {} cubes generated, {} kept, {} dynamic, {} rebuild frames)",
         run.name,
         commit_label(run),
+        run.scenario.name,
         run.scenario.generated_cubes,
-        run.scenario.kept_cubes
+        run.scenario.kept_cubes,
+        run.scenario.dynamic_cubes,
+        run.scenario.rebuild_frames
     )
 }
 
@@ -59,13 +62,42 @@ fn row(label: &str, a: Option<&Summary>, b: Option<&Summary>) -> [String; 7] {
     ]
 }
 
+/// The row of the slowest frame: its time in the median columns, dashes in
+/// the p95 ones, and a delta only when both sides know it.
+fn max_row(label: &str, a: Option<&Summary>, b: Option<&Summary>) -> [String; 7] {
+    let (a, b) = (a.and_then(|s| s.max_ms), b.and_then(|s| s.max_ms));
+    let ms = |v: Option<f32>| v.map_or_else(|| DASH.to_string(), |v| format!("{v:.2}"));
+    let (delta_ms, delta_pct) = match (a, b) {
+        (Some(a), Some(b)) => {
+            let d = b - a;
+            let pct = if a == 0.0 {
+                String::new()
+            } else {
+                format!("{:+.1}%", d / a * 100.0)
+            };
+            (format!("{d:+.2}"), pct)
+        }
+        _ => (String::new(), String::new()),
+    };
+    [
+        label.to_string(),
+        ms(a),
+        DASH.to_string(),
+        ms(b),
+        DASH.to_string(),
+        delta_ms,
+        delta_pct,
+    ]
+}
+
 /// Renders the comparison of `a` (the base) and `b` as text.
 pub fn compare(a: &RunResults, b: &RunResults) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "a: {}", header_line(a));
     let _ = writeln!(out, "b: {}", header_line(b));
 
-    if a.scenario.version != b.scenario.version
+    if a.scenario.name != b.scenario.name
+        || a.scenario.version != b.scenario.version
         || a.scenario.warmup_frames != b.scenario.warmup_frames
         || a.scenario.measured_frames != b.scenario.measured_frames
     {
@@ -114,6 +146,7 @@ pub fn compare(a: &RunResults, b: &RunResults) -> String {
     let mut rows = vec![
         ["", "median a", "p95 a", "median b", "p95 b", "Δ ms", "Δ %"].map(String::from),
         row("frame CPU", Some(&a.cpu_frame), Some(&b.cpu_frame)),
+        max_row("frame CPU max", Some(&a.cpu_frame), Some(&b.cpu_frame)),
         row("GPU total", a.gpu_total.as_ref(), b.gpu_total.as_ref()),
     ];
     fn find<'a>(run: &'a RunResults, label: &str) -> Option<&'a Summary> {
@@ -182,6 +215,26 @@ mod tests {
         assert!(!compare(&a, &b).contains("not the same"));
         b.scenario.version += 1;
         assert!(compare(&a, &b).contains("not the same scenario"));
+    }
+
+    #[test]
+    fn compare_warns_when_the_scenarios_have_different_names() {
+        let a = run("a", 4.0);
+        let mut b = run("b", 4.0);
+        b.scenario.name = "moving".into();
+        assert!(compare(&a, &b).contains("not the same scenario"));
+    }
+
+    #[test]
+    fn compare_names_the_scenario_and_its_dynamic_cubes() {
+        let mut a = run("a", 4.0);
+        a.scenario.name = "moving".into();
+        a.scenario.dynamic_cubes = 40_328;
+        let out = compare(&a, &a);
+        assert!(
+            out.contains("moving") && out.contains("40328 dynamic"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -270,6 +323,28 @@ mod tests {
         let out = compare(&a, &b);
         let line = out.lines().find(|l| l.contains("cull")).unwrap();
         assert!(line.contains('—'), "{out}");
+    }
+
+    #[test]
+    fn compare_shows_the_slowest_frame_and_a_dash_when_unknown() {
+        let (mut a, b) = (run("a", 4.0), run("b", 4.0));
+        a.cpu_frame.max_ms = None;
+        let out = compare(&a, &b);
+        assert!(out.contains("frame CPU max"), "{out}");
+        assert!(
+            out.lines()
+                .find(|l| l.contains("frame CPU max"))
+                .unwrap()
+                .contains(DASH),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn compare_shows_how_long_the_rebuilds_took() {
+        let mut a = run("a", 4.0);
+        a.scenario.rebuild_frames = 7;
+        assert!(compare(&a, &a).contains("7 rebuild frames"));
     }
 
     #[test]

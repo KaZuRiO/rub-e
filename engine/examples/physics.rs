@@ -152,7 +152,14 @@ impl PhysicsDemo {
         let mut static_cubes = make_floor();
         static_cubes.extend(make_wall_panels());
 
-        let mut scene = Scene::new(&gpu.device, &static_cubes, CUBE_COUNT * 8, width, height);
+        let mut scene = Scene::new(
+            &gpu.device,
+            &static_cubes,
+            static_cubes.len(),
+            CUBE_COUNT * 8,
+            width,
+            height,
+        );
         scene
             .set_skybox_from_hdr(&gpu.device, SKY, SKY_FACE, Mat4::IDENTITY)
             .context("loading the skybox")?;

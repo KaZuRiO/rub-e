@@ -1,13 +1,24 @@
 //! Frustum culling on the GPU, in two compute passes.
 //!
-//! The static cubes are grouped into chunks — 32×32 tiles in the XZ plane, of
-//! any height — once, on the CPU, and only those with a face free are kept
-//! (see [`StaticWorld`]). Each frame the first pass tests every
-//! chunk's bounding box against the camera and writes one flag per chunk; the
-//! second runs once per cube, skips those whose chunk is out of view, tests
-//! the rest one by one, and appends the survivors to `visible` while counting
-//! them into the indirect draw. Nothing comes back to the CPU.
+//! The static cubes are grouped into chunks — cubes of 32×32×32 world units.
+//! Each frame the first pass tests every chunk's bounding box against the
+//! camera and writes one flag per chunk; the second runs once per cube slot,
+//! skips those whose chunk is out of view, tests the rest one by one, and
+//! appends the survivors' indices to `visible` while counting them into the
+//! indirect draw. Nothing comes back to the CPU. Only the cubes the [`World`]
+//! calls exposed reach the GPU: a buried block is never uploaded.
+//!
+//! The buffers are sized once, for the scene's static capacity. A chunk the
+//! [`World`] changed is rewritten whole by [`StaticCubes::rebuild`], into any
+//! free slots: its cubes may be spread over several pieces, since the cube
+//! pass finds a slot's chunk through `chunk_ids` alone. Row 0 of the chunk
+//! table is kept empty, with a count of 0, which the chunk pass always calls
+//! invisible; every free slot points at it.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
+
+use bytemuck::Zeroable as _;
 use etib_core::{
     Access, BindGroup, BindLayout, ComputePass, ComputePipeline, Device, DrawIndexedArgs,
     IndirectBuffer, Shader, Stage, StorageBuffer,
@@ -15,10 +26,10 @@ use etib_core::{
 use glam::Vec3;
 
 use crate::cube::{INDICES, StaticCubeRaw};
-use crate::model::ModelCube;
-use crate::static_world::StaticWorld;
+use crate::slots::SlotAllocator;
+use crate::world::World;
 
-/// The side of a chunk in the XZ plane, in world units.
+/// The side of a chunk, in world units, on all three axes.
 pub(crate) const CHUNK_SIZE: f32 = 32.0;
 
 /// Threads per workgroup in both culling shaders.
@@ -40,68 +51,14 @@ pub(crate) struct ChunkRaw {
     pub _pad1: [u32; 3],
 }
 
-/// The static cubes as the culling passes want them: sorted by chunk, with
-/// the chunk each one belongs to alongside.
-#[derive(Debug)]
-pub(crate) struct StaticLayout {
-    pub instances: Vec<StaticCubeRaw>,
-    /// For each instance, the index of its chunk.
-    pub chunk_ids: Vec<u32>,
-    pub chunks: Vec<ChunkRaw>,
-}
+/// A chunk, named by its position on the grid of chunks: the chunk `[1, 0, 0]`
+/// covers `32.0..64.0` in X and `0.0..32.0` in Y and Z.
+pub(crate) type ChunkKey = [i32; 3];
 
-/// The exposed cubes of `world`, chunk by chunk, with each chunk's bounds.
-///
-/// A chunk with no exposed cube gets no entry. Chunks come out in a fixed
-/// order, by tile, and the cubes in a fixed order within each, so the same
-/// cubes always give the same buffers.
-pub(crate) fn build_chunks(world: &StaticWorld) -> StaticLayout {
-    let mut layout = StaticLayout {
-        instances: Vec::new(),
-        chunk_ids: Vec::new(),
-        chunks: Vec::new(),
-    };
-    for key in world.chunk_keys() {
-        let members = world.exposed(key);
-        if members.is_empty() {
-            continue;
-        }
-        // The bounds of the cubes' faces, not of their centres.
-        let (min, max) = members.iter().fold(
-            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-            |(min, max), cube| {
-                let centre = Vec3::from(cube.position);
-                (min.min(centre - 0.5), max.max(centre + 0.5))
-            },
-        );
-
-        let index = count(layout.chunks.len());
-        layout.chunks.push(ChunkRaw {
-            aabb_min: min.to_array(),
-            _pad0: 0.0,
-            aabb_max: max.to_array(),
-            start_idx: count(layout.instances.len()),
-            count: count(members.len()),
-            _pad1: [0; 3],
-        });
-        layout
-            .chunk_ids
-            .extend(std::iter::repeat_n(index, members.len()));
-        layout.instances.extend(members);
-    }
-    layout
-}
-
-/// The XZ tile a position falls in.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "a world 32 units a tile would need to be 2^36 units wide to overflow, and `as` saturates"
-)]
-pub(crate) fn tile_of(position: Vec3) -> (i32, i32) {
-    (
-        (position.x / CHUNK_SIZE).floor() as i32,
-        (position.z / CHUNK_SIZE).floor() as i32,
-    )
+/// The chunk a position falls in. Past `i32` chunks, which a world would need
+/// to be 2^36 units wide to reach, the key saturates.
+pub(crate) fn chunk_of(position: Vec3) -> ChunkKey {
+    (position / CHUNK_SIZE).floor().as_ivec3().to_array()
 }
 
 /// A number of cubes, chunks or indices as the `u32` the shaders count in.
@@ -178,12 +135,11 @@ impl CullingPasses {
 
 /// The static cubes on the GPU, and everything culling them needs.
 pub(crate) struct StaticCubes {
-    /// Bound through the cull and draw groups only, but held so they live as
-    /// long.
-    _instances: StorageBuffer<StaticCubeRaw>,
-    _chunks: StorageBuffer<ChunkRaw>,
+    instances: StorageBuffer<StaticCubeRaw>,
+    chunks: StorageBuffer<ChunkRaw>,
+    /// Bound through the cull groups only, but held so it lives as long.
     _chunk_visible: StorageBuffer<u32>,
-    _chunk_ids: StorageBuffer<u32>,
+    chunk_ids: StorageBuffer<u32>,
     /// The indices into the instances of the cubes that survived this frame.
     /// Bound through the cull and draw groups; read directly only by tests.
     #[cfg_attr(not(test), expect(dead_code, reason = "held for the bind groups"))]
@@ -193,36 +149,44 @@ pub(crate) struct StaticCubes {
     cube_group: BindGroup,
     /// What the static cube draw reads: the instances and `visible`.
     pub draw_group: BindGroup,
-    /// Kept so that a change to the world can rebuild one chunk's range.
-    #[expect(dead_code, reason = "for editing the world, not yet written")]
-    world: StaticWorld,
-    /// Cubes sent to the GPU: the exposed ones.
-    pub count: u32,
-    /// Cubes the scene was built from, buried ones and duplicates included.
-    pub total: u32,
-    pub chunk_count: u32,
+    slots: SlotAllocator,
+    /// Where each chunk on the GPU sits: its row and its slots.
+    placed: BTreeMap<ChunkKey, Placed>,
+    /// Rows given back, lowest reused first.
+    free_rows: BTreeSet<u32>,
+    /// One past the highest row handed out; row 0 is the empty one.
+    rows_end: u32,
+}
+
+/// A chunk's place on the GPU.
+struct Placed {
+    row: u32,
+    pieces: Vec<Range<u32>>,
 }
 
 impl StaticCubes {
-    /// `None` for no cubes: a buffer cannot be empty, and there would be
-    /// nothing to cull or draw.
-    pub fn new(device: &Device, passes: &CullingPasses, cubes: &[ModelCube]) -> Option<Self> {
-        if cubes.is_empty() {
+    /// The buffers for `world.capacity()` cubes, with every chunk of `world`
+    /// written in key order, so a scene that never changes has its chunks
+    /// packed. `None` for a capacity of 0: a buffer cannot be empty, and there
+    /// would be nothing to cull or draw.
+    pub fn new(device: &Device, passes: &CullingPasses, world: &World) -> Option<Self> {
+        if world.capacity() == 0 {
             return None;
         }
-        let started = std::time::Instant::now();
-        let world = StaticWorld::from_cubes(cubes);
-        let layout = build_chunks(&world);
-        let total = world.total();
-        let count = count(layout.instances.len());
-        let chunk_count = self::count(layout.chunks.len());
+        let capacity = count(world.capacity());
+        // A chunk can hold a single cube, so as many rows as cubes, plus the
+        // empty one.
+        let rows = capacity
+            .checked_add(1)
+            .expect("a static capacity under u32::MAX");
 
-        let instances = StorageBuffer::from_slice(device, "static instances", &layout.instances);
-        let visible = StorageBuffer::new(device, "visible indices", count);
+        let started = std::time::Instant::now();
+        let instances = StorageBuffer::new(device, "static instances", capacity);
+        let visible = StorageBuffer::new(device, "visible indices", capacity);
         let draw = IndirectBuffer::new(device, "static draw", 1);
-        let chunks = StorageBuffer::from_slice(device, "chunks", &layout.chunks);
-        let chunk_visible = StorageBuffer::new(device, "chunk visibility", chunk_count);
-        let chunk_ids = StorageBuffer::from_slice(device, "cube chunk ids", &layout.chunk_ids);
+        let chunks = StorageBuffer::new(device, "chunks", rows);
+        let chunk_visible = StorageBuffer::new(device, "chunk visibility", rows);
+        let chunk_ids = StorageBuffer::new(device, "cube chunk ids", capacity);
 
         let chunk_group =
             passes
@@ -236,26 +200,149 @@ impl StaticCubes {
         let draw_group = passes
             .draw_layout
             .group(device, "static draw", &[&instances, &visible]);
-        log::info!(
-            "{total} static cubes, {count} exposed, in {chunk_count} chunk(s), built in {} ms",
-            started.elapsed().as_millis()
-        );
 
-        Some(Self {
-            _instances: instances,
-            _chunks: chunks,
+        let mut statics = Self {
+            instances,
+            chunks,
             _chunk_visible: chunk_visible,
-            _chunk_ids: chunk_ids,
+            chunk_ids,
             visible,
             draw,
             chunk_group,
             cube_group,
             draw_group,
-            world,
-            count,
-            total,
-            chunk_count,
+            slots: SlotAllocator::new(capacity),
+            placed: BTreeMap::new(),
+            free_rows: BTreeSet::new(),
+            rows_end: 1,
+        };
+        for key in world.chunk_keys() {
+            statics.rebuild(device, world, key);
+        }
+        log::info!(
+            "{} static cubes, {} exposed, in {} chunk(s), room for {capacity}, built in {} ms",
+            world.cube_count(),
+            statics.sent_count(),
+            statics.chunk_count(),
+            started.elapsed().as_millis()
+        );
+        Some(statics)
+    }
+
+    /// Replaces what the GPU holds for chunk `key` with what `world` holds,
+    /// all in one go: the writes are queued, so they land together before the
+    /// culling recorded after them.
+    ///
+    /// # Panics
+    ///
+    /// If the free slots cannot hold the chunk, which the rebuild planner
+    /// rules out.
+    pub fn rebuild(&mut self, device: &Device, world: &World, key: ChunkKey) {
+        let old = self.placed.remove(&key);
+        if let Some(old) = &old {
+            for piece in &old.pieces {
+                self.chunk_ids
+                    .write(device, piece.start, &vec![0; piece.len()]);
+            }
+            self.slots.free(&old.pieces);
+        }
+
+        let instances = world.instances(key);
+        if instances.is_empty() {
+            if let Some(old) = old {
+                self.chunks.write(device, old.row, &[ChunkRaw::zeroed()]);
+                self.free_rows.insert(old.row);
+            }
+            return;
+        }
+
+        let row = match old {
+            Some(old) => old.row,
+            None => self.free_rows.pop_first().unwrap_or_else(|| {
+                self.rows_end += 1;
+                self.rows_end - 1
+            }),
+        };
+        let pieces = self
+            .slots
+            .alloc(count(instances.len()))
+            .expect("the rebuild planner leaves room for every chunk it writes");
+
+        let mut rest = instances.as_slice();
+        for piece in &pieces {
+            let (these, others) = rest.split_at(piece.len());
+            self.instances.write(device, piece.start, these);
+            self.chunk_ids
+                .write(device, piece.start, &vec![row; piece.len()]);
+            rest = others;
+        }
+
+        // The bounds of the cubes' faces, not of their centres.
+        let (min, max) = instances.iter().fold(
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            |(min, max), cube| {
+                let centre = Vec3::from(cube.position);
+                (min.min(centre - 0.5), max.max(centre + 0.5))
+            },
+        );
+        self.chunks.write(
+            device,
+            row,
+            &[ChunkRaw {
+                aabb_min: min.to_array(),
+                _pad0: 0.0,
+                aabb_max: max.to_array(),
+                start_idx: pieces[0].start,
+                count: count(instances.len()),
+                _pad1: [0; 3],
+            }],
+        );
+        self.placed.insert(key, Placed { row, pieces });
+    }
+
+    /// Slots no chunk holds, counting none still taken by a chunk's old
+    /// version.
+    pub fn free_slots(&self) -> u32 {
+        self.slots.free_count()
+    }
+
+    /// The cubes chunk `key` takes on the GPU, 0 if it is not there.
+    pub fn gpu_len(&self, key: ChunkKey) -> u32 {
+        self.placed.get(&key).map_or(0, |placed| {
+            placed
+                .pieces
+                .iter()
+                .map(|piece| piece.end - piece.start)
+                .sum()
         })
+    }
+
+    /// The chunks on the GPU.
+    pub fn chunk_count(&self) -> usize {
+        self.placed.len()
+    }
+
+    /// The cubes on the GPU, every chunk in the version it holds there: one
+    /// waiting for a rebuild counts as it was.
+    pub fn sent_count(&self) -> u32 {
+        self.placed.keys().map(|&key| self.gpu_len(key)).sum()
+    }
+
+    /// Every instance a chunk holds on the GPU, sorted by their bytes so two
+    /// scenes compare whatever slots they landed in.
+    #[cfg(test)]
+    pub fn live_instances(&self, device: &Device) -> Vec<StaticCubeRaw> {
+        let ids = self.chunk_ids.read_back(device);
+        let mut live: Vec<StaticCubeRaw> = self
+            .instances
+            .read_back(device)
+            .into_iter()
+            .zip(ids)
+            .filter(|(_, id)| *id != 0)
+            .map(|(cube, _)| cube)
+            .collect();
+        live.sort_by(|a, b| bytemuck::bytes_of(a).cmp(bytemuck::bytes_of(b)));
+        live
     }
 
     /// Zeroes this frame's count. Queued, so it lands before the culling
@@ -271,29 +358,41 @@ impl StaticCubes {
         );
     }
 
-    /// Records both culling passes.
+    /// Records both culling passes, over the rows and slots in use only: a
+    /// scene packed at load costs what it always did.
     pub fn cull(&self, pass: &mut ComputePass<'_>, passes: &CullingPasses, camera: &BindGroup) {
         pass.set_pipeline(&passes.chunk_pipeline);
         pass.set_bind_group(0, camera);
         pass.set_bind_group(1, &self.chunk_group);
-        pass.dispatch_workgroups(self.chunk_count.div_ceil(WORKGROUP), 1, 1);
+        pass.dispatch_workgroups(self.rows_end.div_ceil(WORKGROUP), 1, 1);
 
         pass.set_pipeline(&passes.cube_pipeline);
         pass.set_bind_group(1, &self.cube_group);
-        pass.dispatch_workgroups(self.count.div_ceil(WORKGROUP), 1, 1);
+        pass.dispatch_workgroups(self.slots.end().div_ceil(WORKGROUP), 1, 1);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use etib_core::test_util::device;
+
     use super::*;
-    use crate::static_world::StaticWorld;
+    use crate::camera::CameraRaw;
+    use crate::model::ModelCube;
 
     fn cube(x: f32, y: f32, z: f32) -> ModelCube {
         ModelCube {
             position: Vec3::new(x, y, z),
             color: Vec3::new(0.5, 0.25, 1.0),
         }
+    }
+
+    fn statics(device: &Device, world: &World) -> StaticCubes {
+        let camera = BindLayout::build(device, "camera")
+            .uniform::<CameraRaw>(Stage::All)
+            .finish();
+        let passes = CullingPasses::new(device, &camera);
+        StaticCubes::new(device, &passes, world).expect("a capacity above 0")
     }
 
     #[test]
@@ -305,55 +404,70 @@ mod tests {
     }
 
     #[test]
-    fn cubes_are_grouped_by_tile() {
-        let layout = build_chunks(&StaticWorld::from_cubes(&[
-            cube(66.0, 0.0, 0.0),
-            cube(0.0, 0.0, 0.0),
-            cube(33.0, 0.0, 0.0),
-            cube(1.0, 5.0, 31.0),
-            cube(-1.0, 0.0, 0.0),
-        ]));
-        // Tiles (-1,0), (0,0), (1,0), (2,0), in that order.
-        assert_eq!(layout.chunks.len(), 4);
+    fn a_tall_column_spans_several_chunks() {
+        assert_eq!(chunk_of(Vec3::new(0.0, 33.0, 0.0)), [0, 1, 0]);
+        assert_eq!(chunk_of(Vec3::new(0.0, -1.0, 0.0)), [0, -1, 0]);
+    }
+
+    #[test]
+    fn chunks_are_packed_at_load_after_the_empty_row() {
+        let Some(device) = device() else { return };
+        let world = World::new(
+            &[
+                cube(66.0, 0.0, 0.0),
+                cube(0.0, 0.0, 0.0),
+                cube(33.0, 0.0, 0.0),
+                cube(1.0, 5.0, 31.0),
+                cube(-1.0, 0.0, 0.0),
+            ],
+            5,
+        );
+        let statics = statics(&device, &world);
+        let rows = statics.chunks.read_back(&device);
+        // Chunks [-1,0,0], [0,0,0], [1,0,0], [2,0,0], in that order, from row 1.
+        assert_eq!(rows[0], ChunkRaw::zeroed());
         assert_eq!(
-            layout
-                .chunks
+            rows[1..5]
                 .iter()
                 .map(|c| (c.start_idx, c.count))
                 .collect::<Vec<_>>(),
             [(0, 1), (1, 2), (3, 1), (4, 1)]
         );
-        assert_eq!(layout.chunk_ids, [0, 1, 1, 2, 3]);
-        assert_eq!(layout.instances.len(), 5);
-        assert_eq!(layout.instances[0].position, [-1.0, 0.0, 0.0]);
+        assert_eq!(statics.chunk_ids.read_back(&device), [1, 2, 2, 3, 4]);
+        let instances = statics.instances.read_back(&device);
+        assert_eq!(instances[0].position, [-1.0, 0.0, 0.0]);
+        // Blocks are stored as drawn: 8-bit sRGB.
         assert_eq!(
-            layout.instances[0].color,
+            instances[0].color,
             crate::cube::pack_srgb8(Vec3::new(0.5, 0.25, 1.0))
         );
     }
 
     #[test]
     fn chunk_bounds_cover_whole_cubes() {
-        let layout = build_chunks(&StaticWorld::from_cubes(&[
-            cube(0.0, 0.0, 0.0),
-            cube(1.0, 5.0, 31.0),
-        ]));
-        let chunk = layout.chunks[0];
+        let Some(device) = device() else { return };
+        let world = World::new(&[cube(0.0, 0.0, 0.0), cube(1.0, 5.0, 31.0)], 2);
+        let chunk = statics(&device, &world).chunks.read_back(&device)[1];
         assert_eq!(chunk.aabb_min, [-0.5, -0.5, -0.5]);
         assert_eq!(chunk.aabb_max, [1.5, 5.5, 31.5]);
     }
 
     #[test]
-    fn the_same_cubes_give_the_same_layout() {
+    fn the_same_cubes_give_the_same_buffers() {
+        let Some(device) = device() else { return };
         let cubes: Vec<_> = (0..200)
             .map(|i| cube((i * 7 % 150) as f32, 0.0, (i * 13 % 90) as f32))
             .collect();
-        let (a, b) = (
-            build_chunks(&StaticWorld::from_cubes(&cubes)),
-            build_chunks(&StaticWorld::from_cubes(&cubes)),
+        let world = || World::new(&cubes, cubes.len());
+        let (a, b) = (statics(&device, &world()), statics(&device, &world()));
+        assert_eq!(a.chunks.read_back(&device), b.chunks.read_back(&device));
+        assert_eq!(
+            a.chunk_ids.read_back(&device),
+            b.chunk_ids.read_back(&device)
         );
-        assert_eq!(a.chunks, b.chunks);
-        assert_eq!(a.chunk_ids, b.chunk_ids);
-        assert_eq!(a.instances, b.instances);
+        assert_eq!(
+            a.instances.read_back(&device),
+            b.instances.read_back(&device)
+        );
     }
 }

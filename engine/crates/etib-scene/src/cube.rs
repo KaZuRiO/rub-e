@@ -183,6 +183,21 @@ pub(crate) fn pack_srgb8(linear: Vec3) -> u32 {
     r | g << 8 | b << 16 | 0xFF << 24
 }
 
+/// The linear RGB behind the three low bytes of `packed`, the inverse of
+/// [`pack_srgb8`]. The alpha byte is ignored.
+pub(crate) fn unpack_srgb8(packed: u32) -> Vec3 {
+    let [r, g, b, _] = packed.to_le_bytes();
+    let [r, g, b] = [r, g, b].map(|byte| {
+        let encoded = f32::from(byte) / 255.0;
+        if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    Vec3::new(r, g, b)
+}
+
 /// One linear channel as an sRGB-encoded byte.
 fn srgb8(linear: f32) -> u8 {
     let linear = if linear.is_nan() {
@@ -280,6 +295,26 @@ mod tests {
             let back = srgb_to_linear(byte as f32 / 255.0);
             assert!((back - v).abs() <= v * 0.05 + 0.0005, "{v} -> {back}");
         }
+    }
+
+    #[test]
+    fn every_byte_survives_a_round_trip() {
+        for byte in 0..=255u32 {
+            let packed = byte | byte << 8 | byte << 16 | 0xFF << 24;
+            assert_eq!(pack_srgb8(unpack_srgb8(packed)), packed, "{byte}");
+        }
+    }
+
+    #[test]
+    fn black_and_white_pack_exactly() {
+        assert_eq!(pack_srgb8(Vec3::ZERO), 0xFF00_0000);
+        assert_eq!(pack_srgb8(Vec3::ONE), 0xFFFF_FFFF);
+        assert_eq!(unpack_srgb8(0xFFFF_FFFF), Vec3::ONE);
+    }
+
+    #[test]
+    fn a_nan_channel_packs_to_zero() {
+        assert_eq!(pack_srgb8(Vec3::new(f32::NAN, 1.0, 0.0)) & 0xFF, 0);
     }
 
     #[test]

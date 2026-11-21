@@ -3,6 +3,10 @@
 // One thread per chunk. Tests the chunk's pre-computed AABB against the camera
 // frustum and writes 1 (visible) or 0 (culled) into chunk_visible[].
 // The per-cube cull pass reads chunk_visible[] to skip entire culled chunks.
+//
+// A row with a count of 0 is never visible. Row 0 is kept that way: every
+// free slot of the instance buffer points at it, so a slot no chunk holds is
+// never drawn, and so is the row of a chunk that was emptied.
 
 struct CameraUniform {
     view_proj:      mat4x4<f32>,
@@ -67,5 +71,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         vec3<f32>(c.aabb_min_x, c.aabb_min_y, c.aabb_min_z),
         vec3<f32>(c.aabb_max_x, c.aabb_max_y, c.aabb_max_z),
     );
-    chunk_visible[idx] = u32(intersects_aabb(aabb));
+    chunk_visible[idx] = u32(c.count > 0u && intersects_aabb(aabb));
 }

@@ -11,7 +11,7 @@
 //! # use etib_scene::*;
 //! # fn go(device: &etib_core::Device, encoder: &mut etib_core::Encoder) -> Result<()> {
 //! let cubes = load_model("world.model")?;
-//! let mut scene = Scene::new(device, &cubes, 1024, 1280, 800);
+//! let mut scene = Scene::new(device, &cubes, cubes.len(), 1024, 1280, 800);
 //! let ship = scene.add_dynamic(DynamicModel::load("ship.model")?)?;
 //!
 //! let mut camera = Camera::new(
@@ -38,15 +38,19 @@ mod culling;
 mod dynamic;
 mod error;
 mod model;
+mod rebuild;
 mod scene;
 mod skybox;
-mod static_world;
+mod slots;
+mod world;
 
 pub use camera::{Camera, CameraController, CameraMode, CameraRaw, Move, Projection};
 pub use cube::{CubeRaw, INDICES, StaticCubeRaw, VERTICES, Vertex};
 pub use dynamic::{DynamicId, DynamicModel};
 pub use error::{Error, Result};
 pub use model::{ModelCube, load_model, parse_model, save_model};
+pub use rebuild::DEFAULT_REBUILD_BUDGET;
 pub use scene::Scene;
+pub use world::BlockEdit;
 
 pub use glam;
