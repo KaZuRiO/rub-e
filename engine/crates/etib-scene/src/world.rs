@@ -141,7 +141,7 @@ struct Exposure<'a> {
 impl<'a> Exposure<'a> {
     fn new(chunks: &'a BTreeMap<ChunkKey, Chunk>, key: ChunkKey) -> Option<Self> {
         let chunk = chunks.get(&key)?;
-        let neighbours = FACES.map(|face| chunks.get(&face_neighbour(key, face)));
+        let neighbours = FACES.map(|face| chunks.get(&face_neighbour(key, face)?));
         Some(Self { chunk, neighbours })
     }
 
@@ -180,11 +180,13 @@ impl<'a> Exposure<'a> {
 /// The faces of a chunk, as the axis across them and the side.
 const FACES: [(usize, i32); 6] = [(0, -1), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)];
 
-/// The chunk across `face` of chunk `key`.
-fn face_neighbour(key: ChunkKey, (axis, side): (usize, i32)) -> ChunkKey {
+/// The chunk across `face` of chunk `key`, or `None` past the end of the key
+/// range, where an off-grid cube's chunk saturates and there is no chunk to
+/// look at.
+fn face_neighbour(key: ChunkKey, (axis, side): (usize, i32)) -> Option<ChunkKey> {
     let mut neighbour = key;
-    neighbour[axis] += side;
-    neighbour
+    neighbour[axis] = neighbour[axis].checked_add(side)?;
+    Some(neighbour)
 }
 
 /// The faces of its chunk `cell` touches, as a bit for each of [`FACES`].
@@ -450,9 +452,10 @@ impl World {
         let needed = self.count + added - removed_blocks - removed_off_grid;
         self.check(needed)?;
 
-        // Cells come in scan order, so runs of one chunk are long: one lookup
-        // and one mark for each, not for each cell. The chunks across the
-        // faces the filled or emptied cells touch are marked too, once a run.
+        // Cells come in scan order, Z innermost, so a run of one chunk is at
+        // most 32 cells: one lookup and one mark for each, not for each cell.
+        // The chunks across the faces the filled or emptied cells touch are
+        // marked too, once a run.
         for run in removes.chunk_by(|a, b| chunk_of_cell(*a) == chunk_of_cell(*b)) {
             let key = chunk_of_cell(run[0]);
             let chunk = self.chunks.get_mut(&key).expect("it held these blocks");
@@ -623,7 +626,9 @@ impl World {
     /// never created for it.
     fn mark_across(&mut self, key: ChunkKey, faces: u8, priority: Priority) {
         for (bit, &face) in FACES.iter().enumerate() {
-            let neighbour = face_neighbour(key, face);
+            let Some(neighbour) = face_neighbour(key, face) else {
+                continue;
+            };
             if faces & 1 << bit != 0 && self.chunks.contains_key(&neighbour) {
                 self.mark(neighbour, priority);
             }
@@ -922,6 +927,25 @@ mod tests {
     }
 
     #[test]
+    fn neighbours_are_found_across_chunks_on_y_and_z() {
+        for (axis, centre) in [(1, [1, 31, 1]), (2, [1, 1, 31])] {
+            // 31 and 32 on `axis` are in chunks 0 and 1.
+            let mut min = IVec3::ZERO;
+            min[axis] = 30;
+            let world = from_cubes(&block(min, 3));
+            assert_eq!(world.chunk_keys().count(), 2, "axis {axis}");
+            let exposed = exposed_set(&world);
+            assert_eq!(exposed.len(), 26, "axis {axis}");
+            assert!(!exposed.contains(&centre), "axis {axis}");
+            let mut key = [0, 0, 0];
+            key[axis] = 1;
+            for key in [[0, 0, 0], key] {
+                assert_eq!(world.sent_len(key) as usize, world.instances(key).len());
+            }
+        }
+    }
+
+    #[test]
     fn negative_coordinates_land_in_negative_chunks() {
         // -3..=-1 on every axis: all in chunk (-1, -1, -1).
         let world = from_cubes(&block(IVec3::splat(-3), 3));
@@ -1008,6 +1032,30 @@ mod tests {
     }
 
     #[test]
+    fn a_cube_in_a_saturated_chunk_has_no_neighbour_to_overflow_into() {
+        // Off the grid, `chunk_of` saturates their chunk key to i32::MIN or
+        // i32::MAX, where there is no chunk across the face to look at.
+        let far = [
+            Vec3::new(f32::INFINITY, 0.0, 0.0),
+            Vec3::new(f32::NEG_INFINITY, 0.0, 0.0),
+            Vec3::new(-1.0e12, 0.0, 0.0),
+        ];
+        let mut cubes = block(IVec3::ZERO, 3);
+        cubes.extend(far.map(cube_at));
+        let world = from_cubes(&cubes);
+        let mut sent = Vec::new();
+        for key in world.chunk_keys() {
+            assert_eq!(world.sent_len(key) as usize, world.instances(key).len());
+            sent.extend(world.instances(key).iter().map(position));
+        }
+        for p in far {
+            assert!(sent.contains(&p), "{p}");
+        }
+        // The block next to the origin is untouched: the shell is exposed.
+        assert_eq!(sent.len(), 26 + far.len());
+    }
+
+    #[test]
     fn float_noise_snaps_to_the_grid() {
         let noisy: Vec<_> = block(IVec3::ZERO, 3)
             .into_iter()
@@ -1026,7 +1074,8 @@ mod tests {
         assert_eq!(exposed_positions(&world), [Vec3::new(32.0, 0.0, 0.0)]);
     }
 
-    // Cells 30..=33 on X, 0..=2 on Y and Z: two chunks along X, (32, 1, 1) buried.
+    // Cells 30..=33 on X, 0..=2 on Y and Z: two chunks along X, (31, 1, 1) and
+    // (32, 1, 1) buried.
     fn slab() -> World {
         let mut cubes = Vec::new();
         for x in 30..=33 {
